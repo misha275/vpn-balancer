@@ -51,3 +51,36 @@ CREATE TABLE IF NOT EXISTS settings (
     value   JSONB NOT NULL,
     updated TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- statistics: traffic per user by hour, last activity, history of the server load
+CREATE TABLE IF NOT EXISTS traffic_hourly (
+    hour      TIMESTAMPTZ NOT NULL,
+    user_name TEXT NOT NULL,
+    up        BIGINT NOT NULL DEFAULT 0,
+    down      BIGINT NOT NULL DEFAULT 0,
+    conns     BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (hour, user_name)
+);
+CREATE TABLE IF NOT EXISTS user_seen (
+    user_name TEXT PRIMARY KEY,
+    last_seen TIMESTAMPTZ NOT NULL,
+    last_ip   TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS metrics (
+    ts    TIMESTAMPTZ PRIMARY KEY,
+    cpu   REAL NOT NULL DEFAULT 0,
+    mem   REAL NOT NULL DEFAULT 0,
+    disk  REAL NOT NULL DEFAULT 0,
+    load1 REAL NOT NULL DEFAULT 0,
+    up    REAL NOT NULL DEFAULT 0,
+    down  REAL NOT NULL DEFAULT 0,
+    conns INT NOT NULL DEFAULT 0,
+    users INT NOT NULL DEFAULT 0
+);
+
+-- quality data kept with the node: last speed measurements (with dates), last check, results per service
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS speed_hist JSONB NOT NULL DEFAULT '[]';
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS speed_try_at TIMESTAMPTZ NOT NULL DEFAULT 'epoch';
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS speed_err TEXT NOT NULL DEFAULT '';
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS check_at TIMESTAMPTZ NOT NULL DEFAULT 'epoch';
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS svc JSONB NOT NULL DEFAULT '{}';

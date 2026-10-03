@@ -1,3 +1,5 @@
+# Два контейнера с кодом: шлюз (то, к чему подключаются пользователи) и контроллер (проверки, выбор узла,
+# панель). Контроллер можно обновлять и перезапускать, не обрывая соединения пользователей: шлюз его не ждёт.
 services:
   postgres:
     image: postgres:16-alpine
@@ -13,16 +15,35 @@ services:
       interval: 5s
       retries: 10
 
+  gateway:
+    build: .
+    image: vpnb-gateway
+    command: ["gateway"]
+    restart: always
+    stop_grace_period: 15s
+    ports:
+      - "443:443"
+    volumes:
+      - ./config.yaml:/etc/balancer/config.yaml:ro
+      - gateway-data:/var/lib/balancer
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9000/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
   balancer:
     build: .
+    image: vpnb-controller
     restart: always
     environment:
       DB_PASSWORD: ${DB_PASSWORD}
     depends_on:
       postgres:
         condition: service_healthy
+      gateway:
+        condition: service_started
     ports:
-      - "443:443"
       - "127.0.0.1:8080:8080"
       # - "8081:8081"     # выдача подписок пользователям (включите sub_listen в config.yaml)
     volumes:
@@ -38,3 +59,4 @@ services:
 volumes:
   pgdata:
   balancer-data:
+  gateway-data:

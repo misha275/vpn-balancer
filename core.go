@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -17,23 +18,33 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
-// Core supervises a sing-box child process and talks to its Clash API.
+// Core turns the node list and the users into a sing-box config and hands it to the
+// gateway (see gateway.go), which switches to it without cutting open connections.
+// It also talks to the Clash API of the instance that is live now.
 type Core struct {
 	cfg        *Config
+	gw         Gateway
+	eng        *Engine // set when the gateway runs inside this process
 	mu         sync.Mutex
-	cmd        *exec.Cmd
 	applied    string
 	hadProxy   bool    // the applied config had at least one node allowed to carry user traffic
 	active     []*Node // nodes that are really in the applied config
 	lastReload time.Time
+	lastUsers  map[string]string // name -> uuid of the applied config
+	lastPolicy []byte            // rules and default action of the applied config
 	http       *http.Client
 
-	gen       atomic.Int64 // bumped on every reload and every process (re)start
+	addrMu sync.RWMutex
+	clash  string // host:port of the Clash API of the live instance
+	socks  string // host:port of its probe inbound
+	gwErr  error  // last problem talking to the gateway
+
+	gen       atomic.Int64 // bumped on every switch to a new instance and on every restart of one
 	changedAt atomic.Int64 // unix nanoseconds of the last bump
+	gwGen     atomic.Int64 // generation counter of the gateway as last seen
 }
 
 func (c *Core) bump() {
@@ -41,17 +52,88 @@ func (c *Core) bump() {
 	c.changedAt.Store(time.Now().UnixNano())
 }
 
-// Gen changes whenever sing-box is reloaded or restarted. The checker uses it to
-// discard probes that were interrupted by a reload instead of blaming the nodes.
+// Gen changes whenever the live sing-box instance is replaced or restarted. The checker uses it to
+// discard probes that were interrupted by it instead of blaming the nodes.
 func (c *Core) Gen() int64 { return c.gen.Load() }
 
-// RecentlyChanged reports whether sing-box was reloaded/restarted within d.
+// RecentlyChanged reports whether the live instance changed within d.
 func (c *Core) RecentlyChanged(d time.Duration) bool {
 	return time.Since(time.Unix(0, c.changedAt.Load())) < d
 }
 
 func NewCore(cfg *Config) *Core {
-	return &Core{cfg: cfg, http: &http.Client{Timeout: 5 * time.Second}}
+	c := &Core{cfg: cfg, http: &http.Client{Timeout: 5 * time.Second}}
+	if cfg.Gateway == "external" {
+		g, err := newRemoteGateway(cfg)
+		if err != nil {
+			log.Fatalf("config: %v", err)
+		}
+		c.gw = g
+	} else {
+		c.eng = NewEngine(cfg, "127.0.0.1", false)
+		c.gw = c.eng
+	}
+	return c
+}
+
+// Gateway returns what the gateway reports (nil when it cannot be reached).
+func (c *Core) GatewayState() (GWState, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	return c.gw.State(ctx)
+}
+
+// GatewayStats returns live sessions and the traffic counted since the previous call.
+func (c *Core) GatewayStats(ctx context.Context) (GWStats, error) {
+	st, err := c.gw.Stats(ctx)
+	if err != nil && strings.Contains(err.Error(), "http 404") {
+		err = errors.New("the gateway is an older version without statistics: bash install.sh update --gateway")
+	}
+	return st, err
+}
+
+// GatewayLogs returns the console of the gateway.
+func (c *Core) GatewayLogs(ctx context.Context, after int64, limit int) (LogPage, error) {
+	pg, err := c.gw.Logs(ctx, after, limit)
+	if err != nil && strings.Contains(err.Error(), "http 404") {
+		err = errors.New("the gateway is an older version without a console: bash install.sh update --gateway")
+	}
+	return pg, err
+}
+
+// GatewayUserLogs returns the diagnostic console (errors, blocked destinations) of one user.
+func (c *Core) GatewayUserLogs(ctx context.Context, user string, after int64, limit int) (LogPage, error) {
+	pg, err := c.gw.UserLogs(ctx, user, after, limit)
+	if err != nil && strings.Contains(err.Error(), "http 404") {
+		err = errors.New("the gateway is an older version: bash install.sh update --gateway")
+	}
+	return pg, err
+}
+
+// Stop ends an embedded gateway (an external one keeps running on purpose).
+func (c *Core) Stop() {
+	if c.eng != nil {
+		c.eng.Shutdown()
+	}
+}
+
+func (c *Core) setAddrs(st GWState) {
+	c.addrMu.Lock()
+	defer c.addrMu.Unlock()
+	if st.Active >= 0 && st.Clash != 0 {
+		h := c.gw.Host()
+		c.clash = fmt.Sprintf("%s:%d", h, st.Clash)
+		c.socks = fmt.Sprintf("%s:%d", h, st.Socks)
+	} else {
+		c.clash, c.socks = "", ""
+	}
+}
+
+// SocksAddr is where the checker reaches the probe inbound of the live instance.
+func (c *Core) SocksAddr() string {
+	c.addrMu.RLock()
+	defer c.addrMu.RUnlock()
+	return c.socks
 }
 
 func (c *Core) cfgPath() string { return filepath.Join(c.cfg.WorkDir, "config.json") }
@@ -126,10 +208,34 @@ func (c *Core) validNodes(nodes []*Node) (good []*Node, bad map[string]string) {
 	return good, bad
 }
 
-// Apply writes a new config and reloads sing-box (SIGHUP) if the node set or
-// the user list changed. It returns the nodes that are really in the running
-// config (nodes rejected by `sing-box check` are left out and logged) and
-// whether a new config was applied.
+// tightens reports whether the new policy forbids something the old one allowed. Then connections that
+// are already open must not live on under the old policy for long.
+func tightens(oldRules, newRules []RuleCfg, oldDef, newDef string) bool {
+	if newDef == "block" && oldDef != "block" {
+		return true
+	}
+	had := map[string]bool{}
+	for _, r := range oldRules {
+		b, _ := json.Marshal(r)
+		had[string(b)] = true
+	}
+	for _, r := range newRules {
+		if r.Action != "block" {
+			continue
+		}
+		b, _ := json.Marshal(r)
+		if !had[string(b)] {
+			return true
+		}
+	}
+	return false
+}
+
+// Apply builds the config for the current nodes and users and hands it to the gateway if it differs from the
+// one that is live. It returns the nodes that are really in it (nodes rejected by `sing-box check` are left
+// out and logged) and whether something was applied. Open user connections are not cut: the gateway starts
+// the new config next to the old one (see gateway.go). They are cut early (urgent) only when the change
+// withdraws something: a user, the node they are using, or a new block rule.
 func (c *Core) Apply(nodes []*Node, users []User, def string) (active []*Node, applied bool, err error) {
 	fp := fingerprint(nodes, users) + "|" + c.policySig(nodes)
 	c.mu.Lock()
@@ -137,25 +243,51 @@ func (c *Core) Apply(nodes []*Node, users []User, def string) (active []*Node, a
 	if fp == c.applied {
 		return c.active, false, nil
 	}
-	// The pause between reloads protects users from constant reconnects. It does not
-	// apply while no node may carry traffic: users are rejected anyway, so the first
-	// allowed node (for example right after the exit country was measured) goes live at once.
+	// The pause between switches keeps the CPU calm (every switch starts a sing-box with all nodes). It does
+	// not apply while no node may carry traffic: users are rejected anyway, so the first allowed node
+	// (for example right after the exit country was measured) goes live at once.
 	if c.applied != "" && c.hadProxy && time.Since(c.lastReload) < c.cfg.MinReload {
 		return c.active, false, nil // retried on the next reconcile tick
+	}
+	// A restarted controller finds the gateway running the very same config: nothing to switch.
+	if c.applied == "" {
+		if st, err := c.GatewayState(); err == nil && st.Active >= 0 && st.Fingerprint == fp && st.Meta != "" {
+			var ids []string
+			if json.Unmarshal([]byte(st.Meta), &ids) == nil {
+				want := map[string]bool{}
+				for _, id := range ids {
+					want[id] = true
+				}
+				for _, n := range nodes {
+					if want[n.ID] {
+						active = append(active, n)
+					}
+				}
+				c.commit(fp, active, users, st)
+				c.lastReload = st.AppliedAt
+				log.Printf("core: the gateway already runs this configuration (%d nodes), nothing to switch", len(active))
+				return active, true, nil
+			}
+		}
 	}
 	if err := os.MkdirAll(c.cfg.WorkDir, 0o755); err != nil {
 		return c.active, false, err
 	}
 	tmp := c.cfgPath() + ".new"
+	var data []byte
 	write := func(ns []*Node) error {
-		data, err := BuildConfig(c.cfg, ns, users, def)
+		d, err := BuildConfig(c.cfg, ns, users, def)
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		if err := os.WriteFile(tmp, d, 0o600); err != nil {
 			return err
 		}
-		return c.check(tmp)
+		if err := c.check(tmp); err != nil {
+			return err
+		}
+		data = d
+		return nil
 	}
 	active = nodes
 	if err := write(active); err != nil {
@@ -174,9 +306,76 @@ func (c *Core) Apply(nodes []*Node, users []User, def string) (active []*Node, a
 			return c.active, false, err
 		}
 	}
-	if err := os.Rename(tmp, c.cfgPath()); err != nil {
-		return c.active, false, err
+	_ = os.Remove(tmp)
+
+	// does the change withdraw something? then old connections get only a short grace period
+	urgent := false
+	newUsers := userMap(users)
+	for name, uuid := range c.lastUsers {
+		if newUsers[name] != uuid {
+			urgent = true // a user was removed or got a new key
+		}
 	}
+	if tightens(c.lastRules(), c.cfg.getRules(), c.lastDefault(), c.cfg.getDefaultAction()) {
+		urgent = true
+	}
+	if cur, err := c.Selected(); err == nil && cur != "" {
+		still := false
+		for _, n := range active {
+			if n.Allowed(c.cfg) && n.Tag() == cur {
+				still = true
+			}
+		}
+		if !still {
+			urgent = true // the node that carries traffic now is no longer allowed
+		}
+	}
+	ids := make([]string, 0, len(active))
+	for _, n := range active {
+		ids = append(ids, n.ID)
+	}
+	meta, _ := json.Marshal(ids)
+	drain := int(c.cfg.DrainTimeout / time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 85*time.Second)
+	defer cancel()
+	st, err := c.gw.Apply(ctx, ApplyReq{Config: data, Fingerprint: fp, Meta: string(meta), Urgent: urgent, DrainSec: drain})
+	if err != nil {
+		return c.active, false, fmt.Errorf("gateway: %w", err) // the old configuration keeps serving
+	}
+	c.commit(fp, active, users, st)
+	c.lastReload = time.Now()
+	c.bump()
+	log.Printf("core: new configuration is live (%d nodes, %d users, urgent=%v)", len(active), len(users), urgent)
+	return active, true, nil
+}
+
+func userMap(users []User) map[string]string {
+	m := make(map[string]string, len(users))
+	for _, u := range users {
+		m[u.Name] = u.UUID
+	}
+	return m
+}
+
+func (c *Core) lastRules() []RuleCfg {
+	var r struct {
+		Rules []RuleCfg `json:"rules"`
+		Def   string    `json:"def"`
+	}
+	_ = json.Unmarshal(c.lastPolicy, &r)
+	return r.Rules
+}
+
+func (c *Core) lastDefault() string {
+	var r struct {
+		Def string `json:"def"`
+	}
+	_ = json.Unmarshal(c.lastPolicy, &r)
+	return r.Def
+}
+
+// commit records what is live now. Called with c.mu held.
+func (c *Core) commit(fp string, active []*Node, users []User, st GWState) {
 	c.applied = fp
 	c.active = active
 	c.hadProxy = false
@@ -186,60 +385,65 @@ func (c *Core) Apply(nodes []*Node, users []User, def string) (active []*Node, a
 			break
 		}
 	}
-	c.lastReload = time.Now()
-	if c.cmd != nil && c.cmd.Process != nil {
-		_ = c.cmd.Process.Signal(syscall.SIGHUP)
-		c.bump()
-		log.Printf("core: config reloaded (%d nodes, %d users)", len(active), len(users))
-	}
-	return active, true, nil
+	c.lastUsers = userMap(users)
+	c.lastPolicy, _ = json.Marshal(map[string]any{"rules": c.cfg.getRules(), "def": c.cfg.getDefaultAction()})
+	c.gwGen.Store(st.Gen)
+	c.setAddrs(st)
 }
 
-// Run keeps sing-box alive (watchdog).
+// Run follows the gateway: where the live instance listens, and whether it was restarted.
 func (c *Core) Run(ctx context.Context) {
-	for ctx.Err() == nil {
-		cmd := exec.CommandContext(ctx, c.cfg.SingboxBin, "run", "-c", c.cfgPath())
-		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-		if err := cmd.Start(); err != nil {
-			log.Printf("core: start failed: %v", err)
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(3 * time.Second):
-			}
-			continue
-		}
-		c.mu.Lock()
-		c.cmd = cmd
-		c.mu.Unlock()
-		c.bump()
-		err := cmd.Wait()
-		c.mu.Lock()
-		c.cmd = nil
-		c.mu.Unlock()
-		c.bump()
-		if ctx.Err() != nil {
-			return
-		}
-		log.Printf("core: sing-box exited (%v), restarting", err)
+	if c.eng != nil {
+		go c.eng.Run(ctx)
+	}
+	t := time.NewTicker(2 * time.Second)
+	defer t.Stop()
+	warned := false
+	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(2 * time.Second):
+		case <-t.C:
+		}
+		st, err := c.GatewayState()
+		if err != nil {
+			if !warned {
+				log.Printf("core: gateway: %v", err)
+				warned = true
+			}
+			c.addrMu.Lock()
+			c.gwErr = err
+			c.addrMu.Unlock()
+			continue
+		}
+		warned = false
+		c.addrMu.Lock()
+		c.gwErr = nil
+		c.addrMu.Unlock()
+		c.setAddrs(st)
+		if prev := c.gwGen.Swap(st.Gen); prev != st.Gen {
+			c.bump() // the gateway changed the live instance without us (restart, recovery)
 		}
 	}
 }
 
 func (c *Core) api(method, path string, body any) ([]byte, error) {
+	c.addrMu.RLock()
+	addr := c.clash
+	c.addrMu.RUnlock()
+	if addr == "" {
+		return nil, errors.New("no live sing-box instance yet")
+	}
 	var rd io.Reader
 	if body != nil {
 		b, _ := json.Marshal(body)
 		rd = bytes.NewReader(b)
 	}
-	req, err := http.NewRequest(method, "http://"+c.cfg.ClashAPI+path, rd)
+	req, err := http.NewRequest(method, "http://"+addr+path, rd)
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("Authorization", "Bearer "+c.cfg.gatewaySecret())
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
@@ -287,7 +491,11 @@ func (c *Core) Selected() (string, error) {
 	return r.Now, nil
 }
 
-func (c *Core) CloseConnections() { _, _ = c.api("DELETE", "/connections", nil) }
+func (c *Core) CloseConnections() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = c.gw.CloseAll(ctx)
+}
 
 // BuildConfig renders the sing-box config:
 //   - vless+reality inbound for users (one stable address for them),

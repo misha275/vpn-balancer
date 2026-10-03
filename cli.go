@@ -8,8 +8,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -22,6 +24,10 @@ const cliHelp = `Команды (внутри контейнера: docker compo
   nodes [-a] [--dead] [--excluded] [--country XX] [текст]
                               список узлов (по умолчанию допущенные и живые, до 30 штук; -a все)
   node ИМЯ                    подробности об одном узле (имя целиком, часть имени или tag)
+  stats                       сервер (процессор, память, диск, сеть) и трафик каждого пользователя: онлайн ли, сколько скачал
+  logs [controller|gateway] [-n N]
+                              последние строки консоли контроллера (по умолчанию) или шлюза (sing-box), 100 строк
+  logs user ИМЯ               ошибки и заблокированные адреса одного пользователя (диагностика)
 
 Управление
   switch ИМЯ                  закрепить узел вручную (пока он жив и допущен)
@@ -32,7 +38,8 @@ const cliHelp = `Команды (внутри контейнера: docker compo
 Пользователи
   users                       список пользователей и их ссылки
   adduser ИМЯ                 создать (печатает ссылку на балансировщик и адрес подписки)
-  deluser ИМЯ                 отключить
+  deluser ИМЯ                 отключить (можно включить обратно)
+  rmuser ИМЯ                  удалить навсегда (ссылка перестаёт работать, статистика стирается)
   enableuser ИМЯ              включить обратно
   sub ИМЯ                     показать адрес личной подписки
 
@@ -116,6 +123,8 @@ type overviewDoc struct {
 	Snapshot Snapshot    `json:"snapshot"`
 	Switches []SwitchRow `json:"switches"`
 	Ready    bool        `json:"ready"`
+	Gateway  *GWState    `json:"gateway"`
+	GWError  string      `json:"gateway_error"`
 }
 
 func getOverview(ctx context.Context, cfg *Config, st *Store) (*overviewDoc, error) {
@@ -151,6 +160,10 @@ func stateWord(n NodeView) string {
 		return "карантин"
 	case n.Score <= 0:
 		return "не работает"
+	case n.Quality == "slow":
+		return "медленный"
+	case strings.HasPrefix(n.Quality, "service:"):
+		return n.Quality[8:] + " не открывается"
 	}
 	return "резерв"
 }
@@ -164,8 +177,8 @@ func printNodes(nodes []NodeView) {
 			cc = "?"
 		}
 		speed := "-"
-		if n.SpeedKbps > 0 {
-			speed = fmt.Sprintf("%d Мбит/с", n.SpeedKbps/1000)
+		if n.SpeedAt > 0 {
+			speed = fmt.Sprintf("%d Мбит/с (%s)", n.SpeedKbps/1000, time.Unix(n.SpeedAt, 0).Format("02.01 15:04"))
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%.1f\t%.0f мс\t%s\t%s\t%s\n", trunc(n.Name, 36), cc, n.Score, n.LatencyMS, speed, stateWord(n), n.Tag)
 	}
@@ -178,6 +191,10 @@ func runCLI(ctx context.Context, cfg *Config, st *Store, cmd string, args []stri
 	switch cmd {
 	case "help", "-h", "--help":
 		fmt.Printf(cliHelp, strings.Join(settingKeys(), ", "))
+	case "stats":
+		return true, cliStats(ctx, cfg, st)
+	case "logs":
+		return true, cliLogs(ctx, cfg, st, args)
 	case "token":
 		tok, err := st.AdminToken(ctx)
 		if err != nil {
@@ -206,6 +223,7 @@ func runCLI(ctx context.Context, cfg *Config, st *Store, cmd string, args []stri
 			}
 		}
 		fmt.Printf("sing-box:        %v\n", map[bool]string{true: "работает", false: "НЕ отвечает"}[d.Ready])
+		fmt.Printf("шлюз:            %s\n", gatewayLine(d))
 		fmt.Printf("связь сервера:   %v\n", map[bool]string{true: "ОТСУТСТВУЕТ", false: "есть"}[s.NetDown])
 		cur := s.Current
 		if cur == "" {
@@ -313,6 +331,29 @@ func runCLI(ctx context.Context, cfg *Config, st *Store, cmd string, args []stri
 		n := hit[0]
 		fmt.Printf("имя:        %s\ntag:        %s\nтип:        %s\nадрес:      %s\nвыход:      %s %s\nдопущен:    %v\nстатус:     %s\nоценка:     %.1f\nуспешность: %.0f%%\nзадержка:   %.0f мс (разброс %.0f)\nскорость:   %d кбит/с\n",
 			n.Name, n.Tag, n.Type, n.Server, n.ExitCountry, n.ExitIP, n.Allowed, stateWord(n), n.Score, n.SuccessRate*100, n.LatencyMS, n.JitterMS, n.SpeedKbps)
+		if n.CheckAt > 0 {
+			fmt.Printf("проверен:   %s\n", time.Unix(n.CheckAt, 0).Format("02.01.2006 15:04:05"))
+		}
+		for i := len(n.SpeedHist) - 1; i >= 0; i-- {
+			p := n.SpeedHist[i]
+			fmt.Printf("замер:      %d кбит/с  %s\n", p.K, time.Unix(p.T, 0).Format("02.01.2006 15:04:05"))
+		}
+		if n.SpeedErr != "" {
+			fmt.Printf("попытка:    %s не удалась: %s\n", time.Unix(n.SpeedTry, 0).Format("02.01 15:04"), n.SpeedErr)
+		}
+		var names []string
+		for k := range n.Services {
+			names = append(names, k)
+		}
+		sort.Strings(names)
+		for _, k := range names {
+			r := n.Services[k]
+			if r.OK {
+				fmt.Printf("сервис:     %-10s открывается (%d мс)  %s\n", k, r.MS, time.Unix(r.T, 0).Format("02.01 15:04"))
+			} else {
+				fmt.Printf("сервис:     %-10s НЕ открывается  %s  %s\n", k, time.Unix(r.T, 0).Format("02.01 15:04"), r.Err)
+			}
+		}
 	case "switch":
 		if len(args) < 1 {
 			return true, fmt.Errorf("usage: switch ИМЯ")
@@ -579,6 +620,165 @@ func cliSubs(ctx context.Context, cfg *Config, st *Store, args []string) error {
 		return save()
 	default:
 		return fmt.Errorf("subs list [--show] | add АДРЕС | del НОМЕР")
+	}
+	return nil
+}
+
+// gatewayLine describes the gateway in one line: which instance is live and what still drains.
+func gatewayLine(d *overviewDoc) string {
+	if d.Gateway == nil {
+		if d.GWError != "" {
+			return "НЕ отвечает: " + d.GWError
+		}
+		return "нет данных"
+	}
+	g := d.Gateway
+	if g.Active < 0 {
+		return "ждёт первую конфигурацию"
+	}
+	var live, old int64
+	var drain int
+	for _, s := range g.Slots {
+		if s.Role == "active" {
+			live = s.Conns
+		} else {
+			old += s.Conns
+			drain++
+		}
+	}
+	line := fmt.Sprintf("работает, подключений %d, конфигурация с %s", live, g.AppliedAt.Local().Format("02.01 15:04:05"))
+	if drain > 0 {
+		line += fmt.Sprintf("; ещё доживают %d на прежней конфигурации (%d экз.)", old, drain)
+	}
+	return line
+}
+
+func humanBytes(n int64) string {
+	u := []string{"Б", "КБ", "МБ", "ГБ", "ТБ"}
+	f, i := float64(n), 0
+	for f >= 1024 && i < len(u)-1 {
+		f /= 1024
+		i++
+	}
+	if i == 0 {
+		return fmt.Sprintf("%d %s", n, u[0])
+	}
+	return fmt.Sprintf("%.1f %s", f, u[i])
+}
+
+func humanBits(bytesPerSec float64) string {
+	b := bytesPerSec * 8
+	switch {
+	case b < 1000:
+		return fmt.Sprintf("%.0f бит/с", b)
+	case b < 1e6:
+		return fmt.Sprintf("%.0f кбит/с", b/1e3)
+	default:
+		return fmt.Sprintf("%.1f Мбит/с", b/1e6)
+	}
+}
+
+func cliStats(ctx context.Context, cfg *Config, st *Store) error {
+	out, err := cliCall(ctx, cfg, st, "GET", "/api/stats", nil)
+	if err != nil {
+		return err
+	}
+	var sys SysSample
+	var static sysStatic
+	var users, other []UserStat
+	var gwErr string
+	var inv []InvalidInfo
+	_ = json.Unmarshal(out["sys"], &sys)
+	_ = json.Unmarshal(out["static"], &static)
+	_ = json.Unmarshal(out["users"], &users)
+	_ = json.Unmarshal(out["other"], &other)
+	_ = json.Unmarshal(out["gateway_error"], &gwErr)
+	_ = json.Unmarshal(out["invalid"], &inv)
+	fmt.Printf("процессор:  %.0f %% (%d яд.), нагрузка %.2f\n", sys.CPU, static.CPUs, sys.Load1)
+	fmt.Printf("память:     %s из %s (%.0f %%)\n", humanBytes(int64(sys.MemUsed)), humanBytes(int64(sys.MemTotal)), sys.Mem)
+	fmt.Printf("диск:       %s из %s (%.0f %%)\n", humanBytes(int64(sys.DiskUsed)), humanBytes(int64(sys.DiskTotal)), sys.Disk)
+	fmt.Printf("сеть:       ↓ %s  ↑ %s, подключений %d, пользователей онлайн %d\n", humanBits(sys.Down), humanBits(sys.Up), sys.Conns, sys.Users)
+	if gwErr != "" {
+		fmt.Printf("ШЛЮЗ НЕ ОТДАЁТ СТАТИСТИКУ: %s\n", gwErr)
+	}
+	fmt.Println()
+	fmt.Printf("%-18s %-10s %-26s %-22s %-22s %-22s %s\n", "ПОЛЬЗОВАТЕЛЬ", "СТАТУС", "СЕЙЧАС", "24 ЧАСА ↓/↑", "7 ДНЕЙ ↓/↑", "ВСЕГО ↓/↑", "БЫЛ В СЕТИ")
+	for _, u := range users {
+		state := "не в сети"
+		if u.Active {
+			state = "передаёт"
+		} else if u.Online {
+			state = "онлайн"
+		}
+		name := u.Name
+		if !u.Enabled {
+			name += " (откл.)"
+		}
+		now := "—"
+		if u.Online || u.UpBps+u.DownBps > 0 {
+			now = fmt.Sprintf("↓%s ↑%s", humanBits(float64(u.DownBps)), humanBits(float64(u.UpBps)))
+		}
+		seen := "никогда"
+		if u.LastSeen != nil {
+			if d := time.Since(time.Unix(*u.LastSeen, 0)); d < 15*time.Second {
+				seen = "сейчас"
+			} else {
+				seen = time.Unix(*u.LastSeen, 0).Format("02.01 15:04")
+			}
+		}
+		fmt.Printf("%-18s %-10s %-26s %-22s %-22s %-22s %s\n", trunc(name, 18), state, now,
+			humanBytes(u.H24Down)+" / "+humanBytes(u.H24Up), humanBytes(u.D7Down)+" / "+humanBytes(u.D7Up), humanBytes(u.AllDown)+" / "+humanBytes(u.AllUp), seen)
+	}
+	for _, u := range other {
+		fmt.Printf("%-18s %s: %d подкл., всего ↓ %s ↑ %s\n", "", u.Label, u.AllConns, humanBytes(u.AllDown), humanBytes(u.AllUp))
+	}
+	if len(inv) > 0 {
+		fmt.Println("\nчаще всего не проходят проверку Reality:")
+		for i, v := range inv {
+			if i == 5 {
+				break
+			}
+			fmt.Printf("  %-18s %d раз, последний %s\n", v.IP, v.Count, v.Last.Local().Format("02.01 15:04:05"))
+		}
+		fmt.Println("  (неверные ключи/short id/отпечаток в клиенте или сканеры; для свежих клиентов Xray поставьте fp=ios)")
+	}
+	return nil
+}
+
+func cliLogs(ctx context.Context, cfg *Config, st *Store, args []string) error {
+	src, n, user := "controller", 100, ""
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case "user":
+			if i+1 >= len(args) {
+				return fmt.Errorf("использование: logs user ИМЯ [-n N]")
+			}
+			i++
+			src, user = "user", args[i]
+		case "-n":
+			if i+1 < len(args) {
+				i++
+				if v, err := strconv.Atoi(args[i]); err == nil && v > 0 {
+					n = v
+				}
+			}
+		case "controller", "gateway":
+			src = args[i]
+		default:
+			return fmt.Errorf("использование: logs [controller|gateway|user ИМЯ] [-n N]")
+		}
+	}
+	out, err := cliCall(ctx, cfg, st, "GET", fmt.Sprintf("/api/logs?src=%s&limit=%d&user=%s", src, n, url.QueryEscape(user)), nil)
+	if err != nil {
+		return err
+	}
+	var lines []LogLine
+	_ = json.Unmarshal(out["lines"], &lines)
+	for _, l := range lines {
+		fmt.Println(l.Text)
+	}
+	if len(lines) == 0 {
+		fmt.Println("(пока пусто)")
 	}
 	return nil
 }

@@ -18,12 +18,20 @@ reality:
   short_id: <openssl rand -hex 8>
   handshake_server: www.microsoft.com
   handshake_port: 443
+  # Отпечаток TLS в выдаваемых ссылках. "ios" надёжно работает с новыми клиентами Xray (v2rayNG, Hiddify);
+  # "chrome" у них шлёт постквантовое приветствие, которое sing-box 1.11 не распознаёт (REALITY: processed invalid connection).
+  fingerprint: ios
 
 # --- проверки ---
 tier1_interval: 1m         # TCP-доступность
 tier2_interval: 3m         # реальные HTTPS-запросы через узел
-tier3_interval: 45m        # тест скорости
-tier3_top: 5
+tier3_interval: 10m        # как часто искать узлы, которым пора измерить скорость
+tier3_top: 5               # сколько узлов за один проход (свежий замер не повторяется: у провайдеров бывает лимит трафика)
+speed_ttl: 12h             # через сколько часов замер скорости считается устаревшим
+service_interval: 1h       # как часто проверять сервисы (Telegram, YouTube, X ...) через все узлы; текущий узел - каждые 10 минут
+min_speed_kbps: 8000       # медленнее 8 Мбит/с узел не выбирается, пока есть быстрые (0 - не учитывать)
+required_services: [telegram]   # узел, через который это не открывается, не выбирается, пока есть другие
+# services: [...]          # список сервисов «имя = адрес, адрес»; по умолчанию Telegram, YouTube, X, TikTok, Instagram, Facebook, WhatsApp, Discord, Google, GitHub, OpenAI, Spotify, Netflix
 watch_interval: 5s         # быстрая проверка текущего узла
 switch_margin: 1.15        # новый узел должен быть лучше на 15%...
 switch_confirm: 3          # ...в течение 3 циклов tier2 подряд
@@ -52,6 +60,10 @@ rules:
 default_action: proxy      # proxy | block (режим белого списка)
 
 # --- подписка для пользователей: первый сервер балансировщик, дальше проверенные узлы ---
+gateway: external          # шлюз в отдельном контейнере (docker-compose.yml): обновление контроллера не обрывает соединения
+gateway_url: http://gateway:9000
+# drain_timeout: 15m       # сколько открытые соединения могут доживать на старой конфигурации
+# drain_urgent: 5s         # то же, если изменение что-то отзывает (пользователь, блокировка)
 gateway_name: Балансировщик
 # sub_listen: 0.0.0.0:8081                      # раскомментируйте, чтобы включить; порт откройте в docker-compose.yml
 # sub_public_url: https://vpn.example.com:8081  # как этот адрес виден снаружи

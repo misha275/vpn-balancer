@@ -37,6 +37,7 @@ textarea{min-height:90px;font-family:ui-monospace,Menlo,Consolas,monospace;font-
 .pill{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;background:var(--chip)}
 .ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.muted{color:var(--muted)}
 .chip{display:inline-flex;gap:6px;align-items:center;background:var(--chip);border-radius:99px;padding:2px 4px 2px 10px;margin:0 6px 6px 0}
+.chip.bad{color:var(--bad)}
 .chip button{border:0;background:none;color:var(--muted);cursor:pointer;font-size:15px;line-height:1}
 .rule{border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:10px}
 .hint{color:var(--muted);font-size:12.5px;margin:4px 0 10px}
@@ -44,6 +45,21 @@ textarea{min-height:90px;font-family:ui-monospace,Menlo,Consolas,monospace;font-
 #toast{position:fixed;right:16px;bottom:16px;max-width:420px;background:var(--text);color:var(--bg);padding:10px 14px;border-radius:10px;display:none;z-index:9}
 #login{max-width:420px;margin:12vh auto}
 .hidden{display:none!important}
+.chartw{position:relative}
+svg.chart{width:100%;height:auto;display:block;overflow:visible}
+svg.chart text{fill:var(--muted);font-size:10px}
+svg.chart .gl{stroke:var(--line);stroke-width:1}
+.tip{position:absolute;top:0;pointer-events:none;background:var(--text);color:var(--bg);padding:5px 8px;border-radius:8px;font-size:12px;white-space:nowrap;display:none;z-index:3}
+.legend{display:flex;gap:14px;font-size:12px;color:var(--muted);margin-bottom:4px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+.cgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:12px}
+@media (max-width:480px){.cgrid{grid-template-columns:1fr}}
+.dotc{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;background:var(--muted)}
+.dotc.on{background:var(--ok)}.dotc.act{background:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 30%,transparent)}
+#con{background:#0b0e12;color:#d6dbe1;border-radius:10px;padding:10px;height:62vh;overflow:auto;font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;word-break:break-all}
+#con div.e{color:#ff8b8b}#con div.w{color:#f3c969}#con div.d{color:#8b95a1}
+:root{--c1:#2563eb;--c2:#d97706;--c3:#15803d}
+@media (prefers-color-scheme:dark){:root{--c1:#6ea0ff;--c2:#fbbf24;--c3:#4ade80}}
 </style>
 </head>
 <body>
@@ -79,7 +95,8 @@ function h(tag, attrs, ...kids){
   return e;
 }
 let TOKEN = sessionStorage.getItem("tok")||"";
-let TAB = "overview", DATA = null, SET = null, USERS = null;
+let TAB = "overview", DATA = null, SET = null, USERS = null, STAT = null, HIST = null, RANGE = "1h";
+const CON = {src:"controller", user:"", users:null, after:0, epoch:0, lines:[], filter:"", follow:true};
 let nodeFilter = "", nodeState = "all", sortKey = "score", sortDir = -1;
 
 function toast(msg, bad){ const t=$("#toast"); t.textContent=msg; t.style.background=bad?"var(--bad)":""; t.style.color=bad?"#fff":""; t.style.display="block"; clearTimeout(toast.t); toast.t=setTimeout(()=>t.style.display="none",4500); }
@@ -95,7 +112,7 @@ $("#logout").onclick=()=>logout(false);
 $("#tokgo").onclick=async()=>{ TOKEN=$("#tok").value.trim(); try{ await api("GET","/api/overview"); sessionStorage.setItem("tok",TOKEN); start(); }catch(e){ $("#tokerr").textContent=e.message; } };
 $("#tok").addEventListener("keydown",e=>{ if(e.key==="Enter") $("#tokgo").click(); });
 
-const TABS=[["overview","Обзор"],["nodes","Узлы"],["settings","Настройки"],["users","Пользователи"]];
+const TABS=[["overview","Обзор"],["server","Сервер"],["clients","Клиенты"],["nodes","Узлы"],["settings","Настройки"],["users","Пользователи"],["console","Консоль"]];
 function renderNav(){ const n=$("#nav"); n.replaceChildren(...TABS.map(([id,t])=>h("button",{class:id===TAB?"on":"",onclick:()=>{TAB=id;load();}},t))); }
 
 async function load(){
@@ -104,6 +121,8 @@ async function load(){
     if (TAB==="overview"||TAB==="nodes"){ DATA=await api("GET","/api/overview"); }
     if (TAB==="settings"){ SET=await api("GET","/api/settings"); }
     if (TAB==="users"){ USERS=await api("GET","/api/users"); }
+    if (TAB==="server"){ [STAT,HIST]=await Promise.all([api("GET","/api/stats"),api("GET","/api/stats/history?range="+RANGE)]); }
+    if (TAB==="clients"){ STAT=await api("GET","/api/stats"); }
     if (!DATA) DATA=await api("GET","/api/overview");
   }catch(e){ if(TOKEN) toast(e.message,true); return; }
   const s=DATA.snapshot, st=$("#state");
@@ -111,17 +130,43 @@ async function load(){
   st.className="pill "+(!DATA.ready||s.net_down?"bad":"ok");
   render();
 }
-function render(){ const m=$("#main"); m.replaceChildren(({overview:vOverview,nodes:vNodes,settings:vSettings,users:vUsers})[TAB]()); }
+function render(){ const m=$("#main"); m.replaceChildren(({overview:vOverview,server:vServer,clients:vClients,nodes:vNodes,settings:vSettings,users:vUsers,console:vConsole})[TAB]()); }
 
 function fmtSpeed(k){ return k>0? (k>=1000? (k/1000).toFixed(0)+" Мбит/с": k+" кбит/с") : "—"; }
 function nodeStatus(n){
   if (n.current) return ["текущий","ok"]; if (n.pinned) return ["закреплён","ok"];
   if (n.exit_country && !n.allowed) return ["исключён: "+n.exit_country,"bad"];
   if (!n.exit_country && n.allowed===false) return ["страна не определена","warn"];
-  if (n.quarantined) return ["карантин","warn"]; if (n.score<=0) return ["не работает","bad"]; return ["в резерве","muted"];
+  if (n.quarantined) return ["карантин","warn"]; if (n.score<=0) return ["не работает","bad"];
+  if (n.quality==="slow") return ["медленный, не выбирается","warn"];
+  if (n.quality&&n.quality.startsWith("service:")) return [n.quality.slice(8)+" не открывается","warn"];
+  return ["в резерве","muted"];
+}
+function fmtDT(ts){ if(!ts) return "—"; const d=new Date(ts*1000); return d.toLocaleDateString([],{day:"2-digit",month:"2-digit"})+" "+d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}); }
+function speedCell(n){
+  const hist=(n.speed_hist||[]).slice().reverse();
+  const old=n.speed_at&&Date.now()/1000-n.speed_at>86400;
+  const tip=hist.length?hist.map(p=>fmtDT(p.t)+": "+fmtSpeed(p.k)).join("\n"):"измерений ещё не было";
+  const slow=n.quality==="slow";
+  return h("div",{title:tip},
+    h("div",{class:slow?"bad":""},n.speed_at?fmtSpeed(n.speed_kbps):"—"),
+    n.speed_at?h("div",{class:"muted",style:"font-size:11px"+(old?";opacity:.7":"")},(old?"старое · ":"")+fmtDT(n.speed_at)):null,
+    n.speed_err&&n.speed_try?h("div",{class:"warn",style:"font-size:11px",title:n.speed_err},"попытка "+fmtDT(n.speed_try)+" не удалась"):null);
+}
+function svcCell(n){
+  const sv=n.services||{}, names=Object.keys(sv).sort();
+  if(!names.length) return h("span",{class:"muted"},"—");
+  return h("div",{style:"display:flex;flex-wrap:wrap;gap:3px;max-width:240px"},names.map(k=>{ const r=sv[k];
+    return h("span",{class:"chip "+(r.ok?"":"bad"),style:"margin:0;padding:1px 6px;font-size:11px",title:k+": "+(r.ok?"открывается, "+r.ms+" мс":"не открывается"+(r.e?" ("+r.e+")":""))+"\n"+fmtDT(r.t)},(r.ok?"✓ ":"✗ ")+k); }));
 }
 function card(k,v,cls){ return h("div",{class:"card"},h("div",{class:"k"},k),h("div",{class:"v "+(cls||"")},v)); }
 
+function gwText(d){
+  const g=d.gateway; if(!g) return d.gateway_error?"не отвечает":"нет данных";
+  if(g.active<0) return "ждёт конфигурацию";
+  let live=0, old=0, n=0; (g.slots||[]).forEach(s=>{ if(s.role==="active") live=s.conns; else { old+=s.conns; n++; } });
+  return live+" подключ."+(n?" (+"+old+" на старой)":"");
+}
 function vOverview(){
   const s=DATA.snapshot, nodes=s.nodes||[];
   const alive=nodes.filter(n=>n.score>0&&n.allowed).length, excl=nodes.filter(n=>!n.allowed).length;
@@ -135,7 +180,8 @@ function vOverview(){
       card("Узлов всего", nodes.length),
       card("Допущено и живых", alive, alive?"ok":"bad"),
       card("Исключено по стране", excl, excl?"warn":""),
-      card("Переключений", s.switches)),
+      card("Переключений", s.switches),
+      card("Шлюз", gwText(DATA), DATA.gateway&&DATA.gateway.active>=0?"ok":"bad")),
     h("div",{class:"card"},h("h2",{},"Страны выхода"),
       h("div",{}, Object.entries(cc).sort((a,b)=>b[1]-a[1]).map(([c,n])=>h("span",{class:"chip",style:"padding-right:10px"},c+" × "+n)))),
     h("div",{class:"card"},h("h2",{},"Действия"),
@@ -165,13 +211,15 @@ function vNodes(){
         [["all","все"],["allowed","допущены и живы"],["excluded","исключены по стране"],["dead","не работают"]].map(([v,t])=>h("option",{value:v,selected:v===nodeState},t))),
       h("span",{class:"muted"},rows.length+" из "+(s.nodes||[]).length)),
     h("div",{class:"card tw"},h("table",{},
-      h("tr",{},th("name","Название"),th("exit_country","Выход"),th("score","Оценка"),th("latency_ms","Задержка"),th("speed_kbps","Скорость"),th("allowed","Статус"),h("th",{},"")),
+      h("tr",{},th("name","Название"),th("exit_country","Выход"),th("score","Оценка"),th("latency_ms","Задержка"),th("speed_kbps","Скорость"),h("th",{},"Сервисы"),th("check_at","Проверен"),th("allowed","Статус"),h("th",{},"")),
       rows.map(n=>{ const [t,c]=nodeStatus(n); return h("tr",{},
         h("td",{},h("div",{},n.name),h("div",{class:"muted mono"},n.server+" · "+n.type)),
         h("td",{},(n.exit_country||"?"),h("div",{class:"muted mono"},n.exit_ip||"")),
         h("td",{},n.score>0?n.score.toFixed(1):"0"),
         h("td",{},n.latency_ms?Math.round(n.latency_ms)+" мс":"—"),
-        h("td",{},fmtSpeed(n.speed_kbps)),
+        h("td",{},speedCell(n)),
+        h("td",{},svcCell(n)),
+        h("td",{class:"muted"},n.check_at?fmtAgo(n.check_at):"—"),
         h("td",{},h("span",{class:c},t)),
         h("td",{},(n.allowed&&n.score>0&&!n.current)?h("button",{class:"b s",onclick:()=>act("/api/pin",{node:n.tag})},"Закрепить"):null)); }))));
 }
@@ -196,6 +244,9 @@ function vSettings(){
   const confirmI=h("input",{type:"number",min:"1",max:"20",value:V.switch_confirm});
   const probes=h("textarea",{},V.probe_urls.join("\n"));
   const subs=h("textarea",{style:"min-height:120px"},V.subscriptions.join("\n"));
+  const minSpeed=h("input",{type:"number",min:"0",step:"1",value:Math.round((V.min_speed_kbps||0)/1000)});
+  const reqSvc=h("input",{value:(V.required_services||[]).join(", "),placeholder:"telegram, youtube"});
+  const svcs=h("textarea",{style:"min-height:200px;font-family:monospace;font-size:12px"},(V.services||[]).join("\n"));
   let rules=V.rules.map(r=>({action:r.action,match:(r.match||[]).join("\n")}));
   const rulesBox=h("div",{});
   const drawRules=()=>rulesBox.replaceChildren(...rules.map((r,i)=>h("div",{class:"rule"},
@@ -225,6 +276,10 @@ function vSettings(){
       h("div",{class:"row"},h("div",{},h("div",{class:"k"},"Запас (раз)"),margin),h("div",{},h("div",{class:"k"},"Циклов подряд"),confirmI)),
       h("div",{class:"k",style:"margin-top:10px"},"Сайты для проверки узлов (по одному на строку)"),probes),
       ()=>save({switch_margin:parseFloat(margin.value),switch_confirm:parseInt(confirmI.value,10),probe_urls:lines(probes.value)})),
+    sec("Качество узлов",["min_speed_kbps","required_services","services"],h("div",{},
+      h("div",{class:"row"},h("div",{},h("div",{class:"k"},"Минимальная скорость, Мбит/с (0 = не учитывать)"),minSpeed),h("div",{class:"grow"},h("div",{class:"k"},"Обязательные сервисы (через запятую)"),reqSvc)),
+      h("div",{class:"k",style:"margin-top:10px"},"Сервисы для проверки: имя = адрес, адрес, … (http://, https:// или tcp://хост:порт)"),svcs),
+      ()=>save({min_speed_kbps:Math.round(parseFloat(minSpeed.value||"0")*1000),required_services:reqSvc.value.split(/[,\s]+/).filter(Boolean),services:lines(svcs.value)})),
     sec("Название",["gateway_name"],gw,()=>save({gateway_name:gw.value})),
     h("div",{class:"hint"},"Остальные параметры (интервалы проверок, ключи Reality, порты) меняются в config.yaml и требуют перезапуска."));
 }
@@ -238,10 +293,157 @@ function vUsers(){
       USERS.map(u=>h("tr",{},
         h("td",{},u.name),h("td",{},h("span",{class:u.enabled?"ok":"muted"},u.enabled?"включён":"отключён")),
         h("td",{},h("div",{class:"row"},"Балансировщик",copyBtn(u.gateway)),u.subscription?h("div",{class:"row",style:"margin-top:6px"},"Подписка",copyBtn(u.subscription)):h("div",{class:"hint"},"подписка выключена (sub_listen)")),
-        h("td",{},h("button",{class:"b "+(u.enabled?"d":"s"),onclick:async()=>{ try{ USERS=await api("POST","/api/users/"+encodeURIComponent(u.name)+"/"+(u.enabled?"disable":"enable")); render(); }catch(e){ toast(e.message,true);} }},u.enabled?"Отключить":"Включить")))))));
+        h("td",{},h("button",{class:"b "+(u.enabled?"d":"s"),onclick:async()=>{ try{ USERS=await api("POST","/api/users/"+encodeURIComponent(u.name)+"/"+(u.enabled?"disable":"enable")); render(); }catch(e){ toast(e.message,true);} }},u.enabled?"Отключить":"Включить"),
+          " ",h("button",{class:"b d",title:"удалить навсегда",onclick:async()=>{ if(!confirm("Удалить пользователя «"+u.name+"» навсегда?\nЕго ссылка перестанет работать, статистика будет стёрта. Отключить без удаления можно кнопкой «Отключить».")) return; try{ USERS=await api("DELETE","/api/users/"+encodeURIComponent(u.name)); toast("Пользователь удалён, из шлюза исчезнет в течение 30 секунд"); render(); }catch(e){ toast(e.message,true);} }},"Удалить")))))));
 }
 
-function start(){ $("#login").classList.add("hidden"); $("#app").classList.remove("hidden"); load(); clearInterval(start.t); start.t=setInterval(()=>{ const a=document.activeElement; if(a&&["INPUT","TEXTAREA","SELECT"].includes(a.tagName)) return; if(TAB==="overview"||TAB==="nodes") load(); },15000); }
+// ---------------------------------------------------------------- statistics
+function fmtBytes(n){ n=n||0; const u=["Б","КБ","МБ","ГБ","ТБ"]; let i=0; while(n>=1024&&i<u.length-1){ n/=1024; i++; } return (i===0?Math.round(n):n>=100?n.toFixed(0):n>=10?n.toFixed(1):n.toFixed(2))+" "+u[i]; }
+function fmtBits(bps){ const b=(bps||0)*8; if(b<1000) return Math.round(b)+" бит/с"; if(b<1e6) return (b/1e3).toFixed(0)+" кбит/с"; if(b<1e9) return (b/1e6).toFixed(b<1e7?2:1)+" Мбит/с"; return (b/1e9).toFixed(2)+" Гбит/с"; }
+function fmtDur(sec){ sec=Math.max(0,Math.round(sec)); const d=Math.floor(sec/86400),hh=Math.floor(sec%86400/3600),m=Math.floor(sec%3600/60); if(d) return d+" д "+hh+" ч"; if(hh) return hh+" ч "+m+" мин"; if(m) return m+" мин"; return sec+" с"; }
+function fmtAgo(ts){ if(!ts) return "никогда"; const d=Date.now()/1000-ts; if(d<15) return "сейчас"; return fmtDur(d)+" назад"; }
+function sv(tag,attrs,...kids){ const e=document.createElementNS("http://www.w3.org/2000/svg",tag); for(const [k,v] of Object.entries(attrs||{})) e.setAttribute(k,v); kids.forEach(c=>e.append(c)); return e; }
+function niceMax(v){ if(v<=0) return 1; const p=Math.pow(10,Math.floor(Math.log10(v))); for(const m of [1,2,2.5,5,10]) if(v<=m*p) return m*p; return 10*p; }
+function fmtT(t,long){ const d=new Date(t*1000); const hm=d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}); return long? d.toLocaleDateString([],{day:"2-digit",month:"2-digit"})+" "+hm : hm; }
+
+// series: [{key,label,color,fmt}], o: {max, fmt}
+function chart(title, pts, series, o){
+  o=o||{};
+  const box=h("div",{class:"card"},h("h2",{},title));
+  if(!pts||pts.length<2){ box.append(h("div",{class:"hint"},"Данные накапливаются: график появится через минуту-две.")); return box; }
+  box.append(h("div",{class:"legend"},series.map(s=>h("span",{},h("i",{style:"background:"+s.color}),s.label))));
+  const W=560,H=150,L=66,R=6,T=8,B=20, long=(pts[pts.length-1].t-pts[0].t)>26*3600;
+  let max=o.max||niceMax(Math.max(...pts.map(p=>Math.max(...series.map(s=>p[s.key]||0)))));
+  const t0=pts[0].t,t1=pts[pts.length-1].t||t0+1, X=t=>L+(W-L-R)*(t-t0)/Math.max(1,t1-t0), Y=v=>T+(H-T-B)*(1-Math.min(v,max)/max);
+  const svg=sv("svg",{class:"chart",viewBox:"0 0 "+W+" "+H});
+  for(let i=0;i<=2;i++){ const v=max*i/2,y=Y(v); svg.append(sv("line",{class:"gl",x1:L,x2:W-R,y1:y,y2:y})); const tx=sv("text",{x:L-5,y:y+3,"text-anchor":"end"}); tx.textContent=(o.fmt||(x=>Math.round(x)))(v); svg.append(tx); }
+  for(let i=0;i<=3;i++){ const t=t0+(t1-t0)*i/3, tx=sv("text",{x:X(t),y:H-5,"text-anchor":i===0?"start":i===3?"end":"middle"}); tx.textContent=fmtT(t,long); svg.append(tx); }
+  series.forEach(s=>{
+    const d=pts.map((p,i)=>(i?"L":"M")+X(p.t).toFixed(1)+" "+Y(p[s.key]||0).toFixed(1)).join(" ");
+    svg.append(sv("path",{d:d+" L"+X(t1)+" "+Y(0)+" L"+X(t0)+" "+Y(0)+"Z",fill:s.color,opacity:".10"}));
+    svg.append(sv("path",{d,fill:"none",stroke:s.color,"stroke-width":"1.6","stroke-linejoin":"round"}));
+  });
+  const vl=sv("line",{x1:0,x2:0,y1:T,y2:H-B,stroke:"var(--muted)","stroke-width":"1",style:"display:none"}); svg.append(vl);
+  const tip=h("div",{class:"tip"}), wrap=h("div",{class:"chartw"},svg,tip);
+  svg.addEventListener("mousemove",e=>{ const r=svg.getBoundingClientRect(), x=(e.clientX-r.left)/r.width*W; let best=0,bd=1e18; pts.forEach((p,i)=>{ const dd=Math.abs(X(p.t)-x); if(dd<bd){bd=dd;best=i;} }); const p=pts[best];
+    vl.setAttribute("x1",X(p.t)); vl.setAttribute("x2",X(p.t)); vl.style.display="";
+    tip.replaceChildren(h("div",{},fmtT(p.t,true)),...series.map(s=>h("div",{},s.label+": "+(s.fmt||o.fmt||(v=>v.toFixed(1)))(p[s.key]||0))));
+    tip.style.display="block"; const left=Math.min(Math.max(0,X(p.t)/W*r.width-60),r.width-130); tip.style.left=left+"px"; });
+  svg.addEventListener("mouseleave",()=>{ vl.style.display="none"; tip.style.display="none"; });
+  box.append(wrap); return box;
+}
+
+function vServer(){
+  if(!STAT) return h("div",{class:"hint"},"загрузка…");
+  const S=STAT.sys, P=(HIST&&HIST.points)||[];
+  const pc=v=>(v||0).toFixed(1)+" %";
+  const cls=v=>v>=90?"bad":v>=75?"warn":"";
+  return h("div",{},
+    STAT.gateway_error?h("div",{class:"card"},h("span",{class:"bad"},"Шлюз не отдаёт статистику: "+STAT.gateway_error)):null,
+    h("div",{class:"grid"},
+      card("Процессор",pc(S.cpu)+" · "+STAT.static.cpus+" яд.",cls(S.cpu)),
+      card("Нагрузка (1 мин)",(S.load1||0).toFixed(2)),
+      card("Память",fmtBytes(S.mem_used)+" из "+fmtBytes(S.mem_total)+" ("+pc(S.mem)+")",cls(S.mem)),
+      card("Диск",fmtBytes(S.disk_used)+" из "+fmtBytes(S.disk_total)+" ("+pc(S.disk)+")",cls(S.disk)),
+      card("Сеть сейчас","↓ "+fmtBits(S.down)+" ↑ "+fmtBits(S.up)),
+      card("Всего через шлюз","↓ "+fmtBytes(STAT.down_total)+" ↑ "+fmtBytes(STAT.up_total)),
+      card("Подключений / онлайн",S.conns+" / "+S.users),
+      card("Сервер работает",fmtDur(STAT.static.uptime_sec))),
+    h("div",{class:"row",style:"margin-bottom:12px"},h("span",{class:"muted"},"Период"),
+      ["1h","6h","24h","7d"].map(r=>h("button",{class:"b "+(r===RANGE?"":"s"),onclick:()=>{RANGE=r;load();}},({"1h":"1 час","6h":"6 часов","24h":"24 часа","7d":"7 дней"})[r]))),
+    h("div",{class:"cgrid"},
+      chart("Процессор, %",P,[{key:"cpu",label:"загрузка",color:"var(--c1)"}],{max:100,fmt:v=>Math.round(v)+"%"}),
+      chart("Память, %",P,[{key:"mem",label:"занято",color:"var(--c2)"}],{max:100,fmt:v=>Math.round(v)+"%"}),
+      chart("Сеть клиентов",P,[{key:"down",label:"к клиентам ↓",color:"var(--c1)",fmt:fmtBits},{key:"up",label:"от клиентов ↑",color:"var(--c3)",fmt:fmtBits}],{fmt:fmtBits}),
+      chart("Подключения и пользователи онлайн",P,[{key:"conns",label:"подключения",color:"var(--c2)",fmt:v=>Math.round(v)},{key:"users",label:"пользователи онлайн",color:"var(--c1)",fmt:v=>Math.round(v)}],{fmt:v=>Math.round(v)}),
+      chart("Диск, %",P,[{key:"disk",label:"занято",color:"var(--c3)"}],{max:100,fmt:v=>Math.round(v)+"%"}),
+      chart("Нагрузка (load average, 1 мин)",P,[{key:"load1",label:"load",color:"var(--c1)",fmt:v=>v.toFixed(2)}],{fmt:v=>v.toFixed(1)})),
+    h("div",{class:"hint"},"Процессор, память и диск показывают весь сервер. «Сеть клиентов» это байты, прошедшие через шлюз от пользователей и к ним (без трафика самих проверок узлов). История сохраняется в базе, 7 дней доступны в графике."));
+}
+
+function userBadge(u){ return h("span",{},h("span",{class:"dotc "+(u.active?"act":u.online?"on":"")}),u.active?"передаёт":u.online?"онлайн":"не в сети"); }
+function vClients(){
+  if(!STAT) return h("div",{class:"hint"},"загрузка…");
+  const U=STAT.users, on=U.filter(u=>u.online).length, act=U.filter(u=>u.active).length;
+  const sum=k=>U.reduce((a,u)=>a+(u[k]||0),0);
+  const tr=(u,named)=>h("tr",{},
+    h("td",{},userBadge(u)),
+    h("td",{},h("div",{},named?u.name:(u.label||u.name)),u.enabled===false&&named?h("div",{class:"muted"},u.removed?"удалён":"отключён"):null),
+    h("td",{},u.online||u.up_bps||u.down_bps?h("div",{},"↓ "+fmtBits(u.down_bps),h("br"),"↑ "+fmtBits(u.up_bps)):h("span",{class:"muted"},"—")),
+    h("td",{},u.conns||"—"),
+    h("td",{class:"mono"},u.ips&&u.ips.length?u.ips.join(", "):(u.last_ip||"—")),
+    h("td",{},"↓ "+fmtBytes(u.h24_down),h("br"),"↑ "+fmtBytes(u.h24_up)),
+    h("td",{},"↓ "+fmtBytes(u.d7_down),h("br"),"↑ "+fmtBytes(u.d7_up)),
+    h("td",{},"↓ "+fmtBytes(u.d30_down),h("br"),"↑ "+fmtBytes(u.d30_up)),
+    h("td",{},"↓ "+fmtBytes(u.all_down),h("br"),"↑ "+fmtBytes(u.all_up)),
+    h("td",{},named?fmtAgo(u.last_seen):"—"),
+    h("td",{},named?h("div",{},u.errors?h("span",{class:"warn",title:(u.err_msg||"")+"\n"+fmtAgo(u.last_err)},u.errors+" ош."):h("span",{class:"muted"},"нет"),
+      " ",h("button",{class:"b s",onclick:()=>{ CON.src="user"; CON.user=u.name; CON.after=0; CON.epoch=0; CON.lines=[]; TAB="console"; load(); }},"Диагностика")):null));
+  const head=()=>h("tr",{},["","Пользователь","Сейчас","Подключ.","Адреса","24 часа","7 дней","30 дней","Всего","Был в сети","Ошибки"].map(t=>h("th",{},t)));
+  return h("div",{},
+    STAT.gateway_error?h("div",{class:"card"},h("span",{class:"bad"},"Шлюз не отдаёт статистику: "+STAT.gateway_error)):null,
+    h("div",{class:"grid"},
+      card("Онлайн сейчас",on+" из "+U.filter(u=>u.enabled).length,on?"ok":""),
+      card("Передают данные",act),
+      card("Трафик за 24 часа","↓ "+fmtBytes(sum("h24_down"))+" ↑ "+fmtBytes(sum("h24_up"))),
+      card("Трафик за 30 дней","↓ "+fmtBytes(sum("d30_down"))+" ↑ "+fmtBytes(sum("d30_up")))),
+    h("div",{class:"card tw"},h("h2",{},"Пользователи"),
+      U.length?h("table",{},head(),U.map(u=>tr(u,true))):h("div",{class:"hint"},"Пока нет данных. Появятся, когда кто-нибудь подключится.")),
+    h("div",{class:"card tw"},h("h2",{},"Активные соединения"),
+      STAT.sessions.length?h("table",{},h("tr",{},["Пользователь","Адрес клиента","Длится","Скачал ↓","Отправил ↑","Без данных"].map(t=>h("th",{},t))),
+        STAT.sessions.slice(-200).reverse().map(se=>h("tr",{},h("td",{},se.user||h("span",{class:"muted"},"определяется…")),h("td",{class:"mono"},se.ip),h("td",{},fmtDur((Date.now()-new Date(se.since))/1000)),h("td",{},fmtBytes(se.down)),h("td",{},fmtBytes(se.up)),h("td",{},se.idle_sec>=5?fmtDur(se.idle_sec):"—")))):h("div",{class:"hint"},"Сейчас нет открытых соединений.")),
+    STAT.other.length||STAT.invalid.length?h("div",{class:"card tw"},h("h2",{},"Не опознанные подключения"),
+      h("div",{class:"hint"},"«Не прошли проверку Reality» это клиенты с неверными ключами, short id или отпечатком TLS, а также сканеры из интернета. Если здесь постоянно один и тот же адрес и это ваш телефон, проверьте в профиле Public Key, Short ID и Fingerprint (для свежих клиентов Xray ставьте ios)."),
+      STAT.other.length?h("table",{},head(),STAT.other.map(u=>tr(u,false))):null,
+      STAT.invalid.length?h("table",{style:"margin-top:10px"},h("tr",{},["Адрес","Попыток","Последняя"].map(t=>h("th",{},t))),
+        STAT.invalid.slice(0,20).map(i=>h("tr",{},h("td",{class:"mono"},i.ip),h("td",{},i.count),h("td",{},fmtAgo(new Date(i.last).getTime()/1000))))):null):null,
+    h("div",{class:"hint"},"Учитывается только объём данных. Какие сайты открывают пользователи, не сохраняется и не показывается."));
+}
+
+// ---------------------------------------------------------------- console
+function vConsole(){
+  const pre=h("div",{id:"con"});
+  const src=h("select",{style:"width:auto",onchange:e=>{CON.src=e.target.value;usel.style.display=CON.src==="user"?"":"none";CON.after=0;CON.epoch=0;CON.lines=[];drawCon();pollCon();}},
+    [["controller","Контроллер"],["gateway","Шлюз (sing-box)"],["user","Ошибки пользователя"]].map(([v,t])=>h("option",{value:v,selected:v===CON.src},t)));
+  const usel=h("select",{style:"width:auto;"+(CON.src==="user"?"":"display:none"),onchange:e=>{CON.user=e.target.value;CON.after=0;CON.epoch=0;CON.lines=[];drawCon();pollCon();}});
+  const fillUsers=()=>usel.replaceChildren(...(CON.users||[]).map(n=>h("option",{value:n,selected:n===CON.user},n)));
+  if(CON.users) fillUsers(); else api("GET","/api/users").then(us=>{ CON.users=us.map(u=>u.name); if(!CON.user&&CON.users.length) CON.user=CON.users[0]; fillUsers(); if(CON.src==="user"){CON.after=0;CON.epoch=0;CON.lines=[];pollCon();} }).catch(()=>{});
+  if(!CON.user&&CON.users&&CON.users.length) CON.user=CON.users[0];
+  const flt=h("input",{class:"grow",placeholder:"фильтр по тексту",value:CON.filter,oninput:e=>{CON.filter=e.target.value;drawCon();}});
+  const fol=h("input",{type:"checkbox",style:"width:auto",checked:CON.follow,onchange:e=>{CON.follow=e.target.checked;if(CON.follow) drawCon();}});
+  setTimeout(()=>{drawCon();pollCon();},0);
+  return h("div",{},
+    h("div",{class:"row",style:"margin-bottom:10px"},src,usel,flt,h("label",{class:"row"},fol,"прокручивать"),
+      h("button",{class:"b s",onclick:()=>{CON.lines=[];drawCon();}},"Очистить экран"),
+      h("button",{class:"b s",onclick:()=>{ const b=new Blob([CON.lines.map(l=>new Date(l.t).toISOString()+" "+l.text).join("\n")],{type:"text/plain"}); const a=h("a",{href:URL.createObjectURL(b),download:"console-"+CON.src+".txt"}); a.click(); }},"Скачать")),
+    pre,
+    h("div",{class:"hint"},"Контроллер: проверки, подписки, переключения. Шлюз: предупреждения и ошибки sing-box, запуск и смена конфигураций. Ошибки пользователя: что не удалось открыть этому клиенту и какие адреса заблокировали правила (хранится последние 300 событий, с момента запуска шлюза); обычные соединения не записываются. Обновляется каждые 2 секунды, хранятся последние 3000 строк."));
+}
+function lineCls(t){ return /\b(ERROR|FATAL|PANIC|panic|failed|ошибк)/i.test(t)?"e":/\bWARN/.test(t)?"w":""; }
+function drawCon(){
+  const el=$("#con"); if(!el) return;
+  const q=CON.filter.toLowerCase();
+  const rows=CON.lines.filter(l=>!q||l.text.toLowerCase().includes(q)).slice(-1200);
+  const stick=CON.follow||(el.scrollTop+el.clientHeight>=el.scrollHeight-30);
+  el.replaceChildren(...rows.map(l=>h("div",{class:lineCls(l.text)},l.text)));
+  if(stick) el.scrollTop=el.scrollHeight;
+}
+async function pollCon(){
+  if(TAB!=="console"||pollCon.busy) return; pollCon.busy=true;
+  try{
+    if(CON.src==="user"&&!CON.user){ drawCon(); return; }
+    const uq=CON.src==="user"?"&user="+encodeURIComponent(CON.user):"";
+    const pg=await api("GET","/api/logs?src="+CON.src+uq+"&after="+CON.after+"&limit=1000");
+    if(pg.epoch!==CON.epoch){ CON.epoch=pg.epoch; CON.lines=[]; CON.after=0; if(pg.last>0&&pg.lines.length===0){ const full=await api("GET","/api/logs?src="+CON.src+uq+"&after=0&limit=1000"); pg.lines=full.lines; } }
+    if(pg.lines.length){ CON.lines=CON.lines.concat(pg.lines).slice(-3000); }
+    CON.after=pg.last; drawCon();
+  }catch(e){ const el=$("#con"); if(el&&!CON.lines.length) el.textContent="Не удалось получить логи: "+e.message; }
+  finally{ pollCon.busy=false; }
+}
+
+function start(){ $("#login").classList.add("hidden"); $("#app").classList.remove("hidden"); load(); clearInterval(start.t); start.t=setInterval(()=>{ const a=document.activeElement; if(a&&["INPUT","TEXTAREA","SELECT"].includes(a.tagName)) return; if(TAB==="overview"||TAB==="nodes") load(); },15000);
+  clearInterval(start.s); start.s=setInterval(()=>{ const a=document.activeElement; if(a&&["INPUT","TEXTAREA","SELECT"].includes(a.tagName)) return; if(TAB==="server"||TAB==="clients") load(); },5000);
+  clearInterval(start.c); start.c=setInterval(pollCon,2000); }
 if (TOKEN) { api("GET","/api/overview").then(start).catch(()=>logout(false)); } else { logout(false); }
 </script>
 </body>

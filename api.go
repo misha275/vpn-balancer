@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +28,8 @@ type API struct {
 	core    *Core
 	token   string
 	refresh chan struct{}
+	stats   *Collector
+	logs    *LogRing
 
 	mu    sync.Mutex
 	fails map[string][]time.Time
@@ -90,12 +93,16 @@ func (a *API) Register(mux *http.ServeMux) {
 		w.Write(uiHTML)
 	})
 	mux.HandleFunc("GET /api/overview", a.auth(a.overview))
+	mux.HandleFunc("GET /api/stats", a.auth(a.statsView))
+	mux.HandleFunc("GET /api/stats/history", a.auth(a.statsHistory))
+	mux.HandleFunc("GET /api/logs", a.auth(a.consoleLogs))
 	mux.HandleFunc("GET /api/settings", a.auth(a.getSettings))
 	mux.HandleFunc("PUT /api/settings", a.auth(a.putSettings))
 	mux.HandleFunc("DELETE /api/settings/{key}", a.auth(a.resetSetting))
 	mux.HandleFunc("GET /api/users", a.auth(a.users))
 	mux.HandleFunc("POST /api/users", a.auth(a.addUser))
 	mux.HandleFunc("POST /api/users/{name}/{op}", a.auth(a.userOp))
+	mux.HandleFunc("DELETE /api/users/{name}", a.auth(a.delUser))
 	mux.HandleFunc("POST /api/pin", a.auth(a.pin))
 	mux.HandleFunc("POST /api/refresh", a.auth(a.doRefresh))
 	mux.HandleFunc("POST /api/recheck", a.auth(a.recheck))
@@ -105,7 +112,13 @@ func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	sw, _ := a.store.RecentSwitches(ctx, 20)
-	writeJSON(w, 200, map[string]any{"snapshot": a.chk.Snapshot(), "switches": sw, "ready": a.core.Ready()})
+	doc := map[string]any{"snapshot": a.chk.Snapshot(), "switches": sw, "ready": a.core.Ready()}
+	if gs, err := a.core.GatewayState(); err == nil {
+		doc["gateway"] = gs
+	} else {
+		doc["gateway_error"] = err.Error()
+	}
+	writeJSON(w, 200, doc)
 }
 
 // settingsView returns the effective values, which of them are overridden in the database, and help texts.
@@ -239,6 +252,21 @@ func (a *API) userOp(w http.ResponseWriter, r *http.Request) {
 	a.users(w, r)
 }
 
+// delUser removes a user for good: the link stops working and the history of the user is dropped.
+func (a *API) delUser(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	ok, err := a.store.DeleteUser(r.Context(), name)
+	if err != nil {
+		apiErr(w, 500, err)
+		return
+	}
+	if !ok {
+		apiErr(w, 404, fmt.Errorf("пользователь %q не найден", name))
+		return
+	}
+	a.users(w, r)
+}
+
 func (a *API) pin(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Node string `json:"node"`
@@ -315,4 +343,74 @@ func WatchSettings(ctx context.Context, cfg *Config, st *Store, onChange func(ma
 			}
 		}
 	}()
+}
+
+func (a *API) statsView(w http.ResponseWriter, r *http.Request) {
+	if a.stats == nil {
+		apiErr(w, 503, fmt.Errorf("statistics are not running"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+	v, err := a.stats.View(ctx)
+	if err != nil {
+		apiErr(w, 500, err)
+		return
+	}
+	writeJSON(w, 200, v)
+}
+
+func (a *API) statsHistory(w http.ResponseWriter, r *http.Request) {
+	if a.stats == nil {
+		apiErr(w, 503, fmt.Errorf("statistics are not running"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+	pts, err := a.stats.History(ctx, r.URL.Query().Get("range"))
+	if err != nil {
+		apiErr(w, 500, err)
+		return
+	}
+	if pts == nil {
+		pts = []SysSample{}
+	}
+	writeJSON(w, 200, map[string]any{"points": pts})
+}
+
+// consoleLogs serves the console: src=controller (this process) or src=gateway.
+func (a *API) consoleLogs(w http.ResponseWriter, r *http.Request) {
+	after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	switch r.URL.Query().Get("src") {
+	case "user":
+		name := r.URL.Query().Get("user")
+		if name == "" {
+			apiErr(w, 400, fmt.Errorf("укажите user"))
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		pg, err := a.core.GatewayUserLogs(ctx, name, after, limit)
+		if err != nil {
+			apiErr(w, 502, err)
+			return
+		}
+		writeJSON(w, 200, pg)
+	case "gateway":
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		pg, err := a.core.GatewayLogs(ctx, after, limit)
+		if err != nil {
+			apiErr(w, 502, err)
+			return
+		}
+		writeJSON(w, 200, pg)
+	default:
+		if a.logs == nil {
+			apiErr(w, 503, fmt.Errorf("console is not running"))
+			return
+		}
+		writeJSON(w, 200, a.logs.Since(after, limit))
+	}
 }

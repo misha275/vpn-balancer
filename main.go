@@ -5,8 +5,10 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -35,6 +37,7 @@ type Config struct {
 		ShortID         string `yaml:"short_id"`
 		HandshakeServer string `yaml:"handshake_server"`
 		HandshakePort   int    `yaml:"handshake_port"`
+		Fingerprint     string `yaml:"fingerprint"` // uTLS fingerprint written into user links
 	} `yaml:"reality"`
 
 	SingboxBin string        `yaml:"singbox_bin"`
@@ -43,6 +46,14 @@ type Config struct {
 	TestPort   int           `yaml:"test_port"`
 	TestSecret string        `yaml:"-"`
 	MinReload  time.Duration `yaml:"min_reload_interval"`
+
+	Gateway       string        `yaml:"gateway"`        // embedded (default) | external
+	GatewayURL    string        `yaml:"gateway_url"`    // external: where the controller reaches the gateway, e.g. http://gateway:9000
+	GatewayListen string        `yaml:"gateway_listen"` // external: control API of the gateway process
+	GatewayBase   int           `yaml:"gateway_port_base"`
+	GatewaySecret string        `yaml:"gateway_secret"` // optional; derived from the Reality key when empty
+	DrainTimeout  time.Duration `yaml:"drain_timeout"`  // how long old connections may live on after a new config went live
+	DrainUrgent   time.Duration `yaml:"drain_urgent"`   // same, when the change withdraws something (user, block rule)
 
 	ProbeURLs        []string      `yaml:"probe_urls"`
 	SpeedURL         string        `yaml:"speed_url"`
@@ -53,6 +64,11 @@ type Config struct {
 	WatchInterval    time.Duration `yaml:"watch_interval"`
 	Tier3Top         int           `yaml:"tier3_top"`
 	Tier2Concurrency int           `yaml:"tier2_concurrency"`
+	MinSpeedKbps     *int          `yaml:"min_speed_kbps"`    // nodes slower than this are not chosen (default 8000 = 8 Mbit/s, 0 = off)
+	RequiredServices []string      `yaml:"required_services"` // services that must open through a node (default telegram)
+	Services         []string      `yaml:"services"`          // "name = address, address" lines; default list in quality.go
+	SpeedTTL         time.Duration `yaml:"speed_ttl"`         // a speed measurement is repeated after this time
+	ServiceInterval  time.Duration `yaml:"service_interval"`  // how often all nodes are checked against the services
 	SwitchMargin     float64       `yaml:"switch_margin"`
 	SwitchConfirm    int           `yaml:"switch_confirm"`
 	TelegramToken    string        `yaml:"telegram_token"`
@@ -117,16 +133,24 @@ func LoadConfig(path string) (*Config, error) {
 	def(&c.NodeGrace, 48*time.Hour)
 	defI(&c.InboundPort, 443)
 	defI(&c.Reality.HandshakePort, 443)
+	defS(&c.Reality.Fingerprint, "ios")
 	defS(&c.Reality.HandshakeServer, "www.microsoft.com")
 	defS(&c.SingboxBin, "sing-box")
 	defS(&c.WorkDir, "/var/lib/balancer")
 	defS(&c.ClashAPI, "127.0.0.1:9090")
 	defI(&c.TestPort, 2080)
 	def(&c.MinReload, 2*time.Minute)
+	defS(&c.Gateway, "embedded")
+	defS(&c.GatewayListen, "0.0.0.0:9000")
+	defI(&c.GatewayBase, 21000)
+	def(&c.DrainTimeout, 15*time.Minute)
+	def(&c.DrainUrgent, 5*time.Second)
 	defS(&c.SpeedURL, "https://speed.cloudflare.com/__down?bytes=5000000")
 	def(&c.Tier1Interval, time.Minute)
 	def(&c.Tier2Interval, 3*time.Minute)
-	def(&c.Tier3Interval, 45*time.Minute)
+	def(&c.Tier3Interval, 10*time.Minute)
+	def(&c.SpeedTTL, 12*time.Hour)
+	def(&c.ServiceInterval, time.Hour)
 	def(&c.WatchInterval, 5*time.Second)
 	defI(&c.Tier3Top, 5)
 	defI(&c.Tier2Concurrency, 20)
@@ -180,12 +204,36 @@ func LoadConfig(path string) (*Config, error) {
 			"https://www.youtube.com/generate_204",
 		}
 	}
+	if c.RequiredServices == nil {
+		c.RequiredServices = append([]string(nil), defaultRequiredServices...)
+	}
+	for i, n := range c.RequiredServices {
+		c.RequiredServices[i] = strings.ToLower(strings.TrimSpace(n))
+	}
+	if len(c.Services) == 0 {
+		c.Services = append([]string(nil), defaultServices...)
+	}
+	if _, err := parseServices(c.Services); err != nil {
+		return nil, err
+	}
 	if len(c.BaselineAddrs) == 0 {
 		c.BaselineAddrs = []string{"1.1.1.1:443", "8.8.8.8:443", "9.9.9.9:443"}
 	}
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	c.TestSecret = hex.EncodeToString(b) // regenerated on every start; config is rewritten at start
+	c.Gateway = strings.ToLower(strings.TrimSpace(c.Gateway))
+	if c.Gateway != "embedded" && c.Gateway != "external" {
+		return nil, fmt.Errorf("gateway must be embedded or external, got %q", c.Gateway)
+	}
+	if c.Gateway == "external" && strings.TrimSpace(c.GatewayURL) == "" {
+		return nil, errors.New("gateway: external needs gateway_url (for example http://gateway:9000)")
+	}
+	if c.Reality.PrivateKey != "" && !strings.HasPrefix(c.Reality.PrivateKey, "<") {
+		// stable across restarts: a gateway that outlives the controller keeps accepting the same probe logins
+		c.TestSecret = derive(c.Reality.PrivateKey, "probe")
+	} else {
+		b := make([]byte, 16)
+		_, _ = rand.Read(b)
+		c.TestSecret = hex.EncodeToString(b)
+	}
 	return c, nil
 }
 
@@ -243,8 +291,8 @@ func (n *Notifier) Notify(key, msg string, every time.Duration) {
 }
 
 func userLink(cfg *Config, name, uuid string) string {
-	return fmt.Sprintf("vless://%s@%s:%d?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp#%s",
-		uuid, cfg.PublicHost, cfg.InboundPort, cfg.Reality.HandshakeServer, cfg.Reality.PublicKey, cfg.Reality.ShortID, url.PathEscape(name))
+	return fmt.Sprintf("vless://%s@%s:%d?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=%s&pbk=%s&sid=%s&type=tcp#%s",
+		uuid, cfg.PublicHost, cfg.InboundPort, cfg.Reality.HandshakeServer, cfg.Reality.Fingerprint, cfg.Reality.PublicKey, cfg.Reality.ShortID, url.PathEscape(name))
 }
 
 // subURL is the address of the user's subscription ("" when the endpoint is not configured).
@@ -300,6 +348,14 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if cmd == "gateway" {
+		// the part users connect to: lives in its own container so that the controller can be updated without touching it
+		if err := cfg.ValidateRun(); err != nil {
+			log.Fatalf("config: %v", err)
+		}
+		RunGateway(ctx, cfg)
+		return
+	}
 	st, err := NewStore(ctx, cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("database: %v", err)
@@ -341,6 +397,18 @@ func main() {
 			log.Fatalf("deluser: %v", err)
 		}
 		fmt.Println("disabled")
+	case "rmuser":
+		if len(args) < 2 {
+			log.Fatal("usage: rmuser NAME")
+		}
+		ok, err := st.DeleteUser(ctx, args[1])
+		if err != nil {
+			log.Fatalf("rmuser: %v", err)
+		}
+		if !ok {
+			log.Fatalf("rmuser: user %q not found", args[1])
+		}
+		fmt.Println("deleted")
 	case "users":
 		us, err := st.ListUsers(ctx)
 		if err != nil {
@@ -364,8 +432,13 @@ func main() {
 }
 
 func run(ctx context.Context, cfg *Config, st *Store) {
+	ctrlLogs := NewLogRing(3000) // the console of the panel
+	log.SetOutput(io.MultiWriter(os.Stderr, ctrlLogs))
 	notify := &Notifier{token: cfg.TelegramToken, chat: cfg.TelegramChat}
 	core := NewCore(cfg)
+	defer core.Stop()
+	col := NewCollector(st, core, ctrlLogs)
+	go col.Run(ctx)
 	chk := NewChecker(cfg, st, core, notify)
 	subs := &Subs{cfg: cfg, store: st, notify: notify, fails: map[string]int{}}
 	refreshCh := make(chan struct{}, 1)
@@ -404,9 +477,17 @@ func run(ctx context.Context, cfg *Config, st *Store) {
 	if last := st.LastSelected(ctx); last != "" {
 		chk.SetCurrent(last)
 	}
-	active, _, err := core.Apply(nodes, users, chk.CurrentTag())
-	if err != nil {
-		log.Fatalf("initial config: %v", err)
+	var active []*Node
+	for i := 0; ; i++ {
+		active, _, err = core.Apply(nodes, users, chk.CurrentTag())
+		if err == nil {
+			break
+		}
+		if i >= 24 || ctx.Err() != nil { // the gateway container may still be starting
+			log.Fatalf("initial config: %v", err)
+		}
+		log.Printf("initial config: %v (retrying)", err)
+		time.Sleep(5 * time.Second)
 	}
 	chk.SyncNodes(active)
 	if len(nodes) == 0 {
@@ -480,7 +561,9 @@ func run(ctx context.Context, cfg *Config, st *Store) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		chk.WriteMetrics(w)
 	})
-	NewAPI(cfg, st, chk, core, adminToken, refreshCh).Register(mux)
+	api := NewAPI(cfg, st, chk, core, adminToken, refreshCh)
+	api.stats, api.logs = col, ctrlLogs
+	api.Register(mux)
 	log.Printf("panel: http://%s/ (token: `balancer token`)", cfg.HTTPListen)
 	srv := &http.Server{Addr: cfg.HTTPListen, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {

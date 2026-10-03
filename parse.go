@@ -26,6 +26,28 @@ type Node struct {
 	ExitIP      string    // address the node's traffic leaves from (measured)
 	ExitCountry string    // ISO country of the exit, "" until measured
 	ExitChecked time.Time // when ExitCountry was measured
+
+	// quality data restored from the database (see NodeState)
+	SpeedHist []SpeedPoint
+	SpeedTry  time.Time
+	SpeedErr  string
+	CheckAt   time.Time
+	Svc       map[string]SvcRes
+}
+
+// SpeedPoint is one successful speed measurement.
+type SpeedPoint struct {
+	K int   `json:"k"` // kbit/s
+	T int64 `json:"t"` // unix seconds
+}
+
+// SvcRes is the last result of one service check (for example "telegram") through a node.
+type SvcRes struct {
+	OK    bool   `json:"ok"`
+	MS    int    `json:"ms"`
+	T     int64  `json:"t"`
+	Fails int    `json:"f"` // consecutive failed passes
+	Err   string `json:"e,omitempty"`
 }
 
 func (n *Node) Tag() string { return "n-" + n.ID[:10] }

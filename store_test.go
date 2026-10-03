@@ -24,7 +24,7 @@ func testStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, tbl := range []string{"users", "nodes", "checks", "switches"} {
+	for _, tbl := range []string{"users", "nodes", "checks", "switches", "traffic_hourly", "user_seen", "metrics"} {
 		if _, err := st.pool.Exec(ctx, "TRUNCATE "+tbl); err != nil {
 			t.Fatal(err)
 		}
@@ -222,5 +222,63 @@ func TestStoreExitSubTokenAndLinks(t *testing.T) {
 	}
 	if _, err := st.UserBySubToken(ctx, "nope"); err == nil {
 		t.Error("unknown token must not match")
+	}
+}
+
+func TestStoreNodeStatsSurviveUpsertAndRestart(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	in := ParseLinks("trojan://pw@2.2.2.2:443#b")
+	if err := st.UpsertNodes(ctx, in, "src1"); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+	ns := NodeStat{ID: in[0].ID, SpeedHist: []SpeedPoint{{K: 5000, T: at.Unix()}, {K: 9000, T: at.Unix() + 60}}, SpeedTry: at, SpeedErr: "timeout", CheckAt: at,
+		Svc: map[string]SvcRes{"telegram": {OK: false, T: at.Unix(), Fails: 2, Err: "x"}}}
+	if err := st.SaveNodeStats(ctx, []NodeStat{ns}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertNodes(ctx, in, "src1"); err != nil { // the subscription refresh must not wipe the measurements
+		t.Fatal(err)
+	}
+	out, err := st.ActiveNodes(ctx, time.Hour)
+	if err != nil || len(out) != 1 {
+		t.Fatal(err, len(out))
+	}
+	n := out[0]
+	if len(n.SpeedHist) != 2 || n.SpeedHist[1].K != 9000 || n.SpeedErr != "timeout" || !n.SpeedTry.Equal(at) || !n.CheckAt.Equal(at) {
+		t.Fatalf("not restored: %+v", n)
+	}
+	if r := n.Svc["telegram"]; r.OK || r.Fails != 2 || r.Err != "x" {
+		t.Fatalf("services not restored: %+v", n.Svc)
+	}
+}
+
+func TestStoreDeleteUser(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+	if _, err := st.AddUser(ctx, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddUser(ctx, "eve"); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = st.pool.Exec(ctx, `INSERT INTO traffic_hourly(hour,user_name,up,down,conns) VALUES(now(),'bob',1,2,3)`)
+	_, _ = st.pool.Exec(ctx, `INSERT INTO user_seen(user_name,last_seen,last_ip) VALUES('bob',now(),'1.1.1.1')`)
+	if ok, err := st.DeleteUser(ctx, "nobody"); ok || err != nil {
+		t.Fatalf("unknown user: %v %v", ok, err)
+	}
+	if ok, err := st.DeleteUser(ctx, "bob"); !ok || err != nil {
+		t.Fatalf("delete: %v %v", ok, err)
+	}
+	us, _ := st.ListUsers(ctx)
+	if len(us) != 1 || us[0].Name != "eve" {
+		t.Fatalf("users left: %+v", us)
+	}
+	var n int
+	_ = st.pool.QueryRow(ctx, `SELECT count(*) FROM traffic_hourly WHERE user_name='bob'`).Scan(&n)
+	_ = st.pool.QueryRow(ctx, `SELECT count(*)+$1 FROM user_seen WHERE user_name='bob'`, n).Scan(&n)
+	if n != 0 {
+		t.Fatal("the counters of a deleted user must go too")
 	}
 }

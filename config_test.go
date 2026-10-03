@@ -38,7 +38,7 @@ public_host: 1.2.3.4
 		t.Fatalf("durations: %v %v", c.SubRefresh, c.Tier2Interval)
 	}
 	// defaults from the spec
-	if c.Tier1Interval != time.Minute || c.Tier3Interval != 45*time.Minute || c.WatchInterval != 5*time.Second ||
+	if c.Tier1Interval != time.Minute || c.Tier3Interval != 10*time.Minute || c.WatchInterval != 5*time.Second ||
 		c.NodeGrace != 48*time.Hour || c.SwitchMargin != 1.15 || c.SwitchConfirm != 3 || c.Tier3Top != 5 ||
 		c.InboundPort != 443 || c.TestPort != 2080 || len(c.ProbeURLs) != 3 || len(c.BaselineAddrs) != 3 || c.Tier2Concurrency < 1 {
 		t.Fatalf("defaults: %+v", c)

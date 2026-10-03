@@ -43,12 +43,12 @@ func TestScoreFormula(t *testing.T) {
 	if math.Abs(st.score-want) > 0.01 {
 		t.Fatalf("score=%v want %v", st.score, want)
 	}
-	st.speedKbps = 40000 // 40 Mbit/s -> +10 bonus (cap)
+	st.addSpeed(40000, time.Now()) // 40 Mbit/s -> +10 bonus (cap)
 	st.recompute()
 	if math.Abs(st.score-(want+10)) > 0.01 {
 		t.Fatalf("with speed score=%v want %v", st.score, want+10)
 	}
-	st.speedKbps = 400000 // cap must hold
+	st.addSpeed(400000, time.Now()) // cap must hold
 	st.recompute()
 	if math.Abs(st.score-(want+10)) > 0.01 {
 		t.Fatalf("speed bonus not capped: %v", st.score)

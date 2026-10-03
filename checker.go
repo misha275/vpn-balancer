@@ -31,6 +31,11 @@ type NodeState struct {
 	quarantine time.Time
 	tcpOK      bool
 	speedKbps  int
+	speedHist  []SpeedPoint // last measurements with their time
+	speedTry   time.Time    // last attempt (also failed ones)
+	speedErr   string       // error of the last attempt, "" if it succeeded
+	checkAt    time.Time    // last completed health check
+	svc        map[string]SvcRes
 	score      float64
 	sr         float64
 	jitter     float64
@@ -96,7 +101,12 @@ func (st *NodeState) recompute() {
 		st.score = 0 // unhealthy
 		return
 	}
-	s := 100*st.sr - math.Min(st.ewma/10, 40) - math.Min(st.jitter/20, 10) + math.Min(float64(st.speedKbps)/1000, 40)/4
+	s := 100*st.sr - math.Min(st.ewma/10, 40) - math.Min(st.jitter/20, 10)
+	// speed counts only while the measurement is fresh; an old one says little about the node now
+	if _, at := st.lastSpeed(); !at.IsZero() && time.Since(at) < 24*time.Hour {
+		s += math.Min(float64(st.speedKbps)/1000, 40) / 4
+	}
+	s -= math.Min(3*float64(st.svcFailCount()), 15)
 	st.score = math.Max(s, 1)
 }
 
@@ -138,7 +148,14 @@ func (c *Checker) SyncNodes(nodes []*Node) {
 			st.Node = n
 			next[n.ID] = st
 		} else {
-			next[n.ID] = &NodeState{Node: n, tcpOK: true}
+			ns := &NodeState{Node: n, tcpOK: true, speedHist: n.SpeedHist, speedTry: n.SpeedTry, speedErr: n.SpeedErr, checkAt: n.CheckAt, svc: n.Svc}
+			if k, _ := ns.lastSpeed(); k > 0 {
+				ns.speedKbps = k
+			}
+			if ns.svc == nil {
+				ns.svc = map[string]SvcRes{}
+			}
+			next[n.ID] = ns
 		}
 	}
 	c.states = next
@@ -235,7 +252,7 @@ func (c *Checker) client(tag string, timeout time.Duration) (*http.Client, *http
 	pu := &url.URL{
 		Scheme: "socks5",
 		User:   url.UserPassword("probe-"+tag, c.cfg.TestSecret),
-		Host:   fmt.Sprintf("127.0.0.1:%d", c.cfg.TestPort),
+		Host:   c.core.SocksAddr(),
 	}
 	tr := &http.Transport{Proxy: http.ProxyURL(pu), DisableKeepAlives: true, TLSHandshakeTimeout: timeout}
 	cl := &http.Client{
@@ -300,6 +317,8 @@ func (c *Checker) Run(ctx context.Context) {
 	go c.loop(ctx, c.cfg.Tier2Interval, c.cfg.Tier2Interval, c.tier2)
 	go c.loop(ctx, c.cfg.Tier3Interval, time.Minute, c.tier3)
 	go c.loop(ctx, c.cfg.WatchInterval, 0, c.watch)
+	go c.loop(ctx, c.cfg.getServiceInterval(), 2*time.Minute, c.services)
+	go c.loop(ctx, 10*time.Minute, 3*time.Minute, c.servicesCurrent)
 	go c.loop(ctx, 15*time.Second, 0, func(context.Context) { c.evaluate(false) })
 	go c.loop(ctx, 20*time.Second, 0, func(context.Context) { c.reconcileSelector() })
 	go c.loop(ctx, time.Hour, 0, func(ctx context.Context) { c.store.Cleanup(ctx, 7*24*time.Hour) })
@@ -422,6 +441,7 @@ func (c *Checker) tier2(ctx context.Context) {
 	if ctx.Err() != nil || !c.baselineOK() || c.core.Gen() != gen {
 		return
 	}
+	var stats []NodeStat
 	c.mu.Lock()
 	for _, r := range all {
 		st := c.states[r.n.ID]
@@ -437,55 +457,101 @@ func (c *Checker) tier2(ctx context.Context) {
 			st.push(result{false, 0})
 			st.maybeQuarantine()
 		}
+		st.checkAt = time.Now()
 		st.recompute()
 		for _, row := range r.rows {
 			c.addRow(row)
 		}
+		stats = append(stats, st.persisted())
 	}
 	c.mu.Unlock()
+	c.saveStats(stats)
 	c.flush()
 	c.geoPass(ctx)
 	c.evaluate(true)
 }
 
-// Tier 3: short speed test for the top-N nodes only, one at a time.
+// Tier 3: short speed test. Priority: the node in use, nodes whose last value was low (a second
+// measurement confirms or clears them), then nodes never measured or measured long ago, best score first.
+// A fresh measurement is not repeated: provider nodes often have a traffic quota.
 func (c *Checker) tier3(ctx context.Context) {
+	now := time.Now()
+	ttl := c.cfg.getSpeedTTL()
+	minSpeed := c.cfg.getMinSpeed()
 	c.mu.RLock()
-	var top []*NodeState
-	for _, st := range c.states {
-		// speed is only worth measuring for nodes that may carry user traffic; a node from a
-		// forbidden country must not take one of the few speed-test slots
-		if st.score > 0 && st.Node.Allowed(c.cfg) {
-			top = append(top, st)
+	type cand struct {
+		st   *NodeState
+		prio int
+	}
+	var cs []cand
+	for id, st := range c.states {
+		// speed is only worth measuring for nodes that may carry user traffic
+		if st.score <= 0 || !st.Node.Allowed(c.cfg) {
+			continue
+		}
+		_, at := st.lastSpeed()
+		p := 9
+		switch {
+		case id == c.current && (at.IsZero() || now.Sub(at) > ttl/2):
+			p = 0
+		case st.speedSuspect(minSpeed) && now.Sub(st.speedTry) > 2*time.Minute:
+			p = 1
+		case at.IsZero() && now.Sub(st.speedTry) > 30*time.Minute:
+			p = 2
+		case !at.IsZero() && now.Sub(at) > ttl:
+			p = 3
+		}
+		if p < 9 {
+			cs = append(cs, cand{st, p})
 		}
 	}
-	sort.Slice(top, func(i, j int) bool { return top[i].score > top[j].score })
-	if len(top) > c.cfg.Tier3Top {
-		top = top[:c.cfg.Tier3Top]
+	sort.Slice(cs, func(i, j int) bool {
+		if cs[i].prio != cs[j].prio {
+			return cs[i].prio < cs[j].prio
+		}
+		return cs[i].st.score > cs[j].st.score
+	})
+	if len(cs) > c.cfg.Tier3Top {
+		cs = cs[:c.cfg.Tier3Top]
 	}
 	var nodes []*Node
-	for _, st := range top {
-		nodes = append(nodes, st.Node)
+	for _, x := range cs {
+		nodes = append(nodes, x.st.Node)
 	}
 	c.mu.RUnlock()
+	gen := c.core.Gen()
 	for _, n := range nodes {
-		if ctx.Err() != nil {
-			return
+		if ctx.Err() != nil || c.core.Gen() != gen {
+			break
 		}
 		kbps, err := c.speed(ctx, n.Tag())
-		row := CheckRow{TS: time.Now(), NodeID: n.ID, Tier: 3, OK: err == nil, SpeedKbps: int32(kbps), Target: c.cfg.SpeedURL}
+		at := time.Now()
+		row := CheckRow{TS: at, NodeID: n.ID, Tier: 3, OK: err == nil, SpeedKbps: int32(kbps), Target: c.cfg.SpeedURL}
 		if err != nil {
 			row.Err = err.Error()
 		}
 		c.addRow(row)
-		if err == nil {
-			c.mu.Lock()
-			if st := c.states[n.ID]; st != nil {
-				st.speedKbps = kbps
-				st.recompute()
-			}
-			c.mu.Unlock()
+		if ctx.Err() != nil || (err != nil && (!c.baselineOK() || c.core.Gen() != gen)) {
+			continue // the failure is probably ours (reload, no internet), not the node's
 		}
+		var ns NodeStat
+		c.mu.Lock()
+		if st := c.states[n.ID]; st != nil {
+			st.speedTry = at
+			if err == nil {
+				st.speedErr = ""
+				st.addSpeed(kbps, at)
+			} else {
+				st.speedErr = shortErr(err)
+			}
+			st.recompute()
+			ns = st.persisted()
+		}
+		c.mu.Unlock()
+		if ns.ID != "" {
+			c.saveStats([]NodeStat{ns})
+		}
+		c.evaluate(false)
 	}
 	c.flush()
 }
@@ -563,8 +629,11 @@ func (c *Checker) decideLocked(cycle bool) (target *Node, reason string, none bo
 			return nil, "", false
 		}
 	}
-	var best *NodeState
+	var best, bestAny *NodeState
 	unchecked := 0
+	now := time.Now()
+	minSpeed, required := c.cfg.getMinSpeed(), c.cfg.getRequired()
+	issue := map[string]string{}
 	for _, st := range c.states {
 		if len(st.win) == 0 {
 			unchecked++
@@ -572,9 +641,19 @@ func (c *Checker) decideLocked(cycle bool) (target *Node, reason string, none bo
 		if st.score <= 0 || !st.Node.Allowed(c.cfg) {
 			continue // dead, or its exit country is unknown/censored: never carry user traffic
 		}
+		if better(st, bestAny) {
+			bestAny = st
+		}
+		if q := c.qualityIssue(st, now, minSpeed, required); q != "" {
+			issue[st.Node.ID] = q // too slow / a required service does not open: only used when nothing better exists
+			continue
+		}
 		if better(st, best) {
 			best = st
 		}
+	}
+	if best == nil {
+		best = bestAny // never leave users without a node because of quality rules
 	}
 	if best == nil {
 		// "all nodes are down" only when every node was actually checked
@@ -584,6 +663,15 @@ func (c *Checker) decideLocked(cycle bool) (target *Node, reason string, none bo
 	if cur == nil || cur.score <= 0 || !cur.Node.Allowed(c.cfg) {
 		c.candID, c.candCnt = "", 0
 		return best.Node, "failover", false
+	}
+	if q := issue[cur.Node.ID]; q != "" && best.Node.ID != cur.Node.ID && issue[best.Node.ID] == "" {
+		// the node in use is slow or lacks a required service while a good one exists: move on without
+		// waiting for hysteresis (existing connections stay, new ones go through the new node)
+		c.candID, c.candCnt = "", 0
+		if strings.HasPrefix(q, "service") {
+			return best.Node, "service", false
+		}
+		return best.Node, "slow", false
 	}
 	if best.Node.ID == cur.Node.ID {
 		c.candID, c.candCnt = "", 0
@@ -662,21 +750,28 @@ func (c *Checker) reconcileSelector() {
 }
 
 type NodeView struct {
-	Tag         string  `json:"tag"`
-	Name        string  `json:"name"`
-	Server      string  `json:"server"`
-	Type        string  `json:"type"`
-	Score       float64 `json:"score"`
-	LatencyMS   float64 `json:"latency_ms"`
-	SuccessRate float64 `json:"success_rate"`
-	JitterMS    float64 `json:"jitter_ms"`
-	SpeedKbps   int     `json:"speed_kbps"`
-	Quarantined bool    `json:"quarantined"`
-	Current     bool    `json:"current"`
-	Pinned      bool    `json:"pinned"`
-	ExitCountry string  `json:"exit_country"`
-	ExitIP      string  `json:"exit_ip"`
-	Allowed     bool    `json:"allowed"` // may carry user traffic (exit country known and not censored)
+	Tag         string            `json:"tag"`
+	Name        string            `json:"name"`
+	Server      string            `json:"server"`
+	Type        string            `json:"type"`
+	Score       float64           `json:"score"`
+	LatencyMS   float64           `json:"latency_ms"`
+	SuccessRate float64           `json:"success_rate"`
+	JitterMS    float64           `json:"jitter_ms"`
+	SpeedKbps   int               `json:"speed_kbps"`
+	SpeedAt     int64             `json:"speed_at"` // unix time of the last successful speed test (0 = never)
+	SpeedHist   []SpeedPoint      `json:"speed_hist"`
+	SpeedTry    int64             `json:"speed_try"` // last attempt
+	SpeedErr    string            `json:"speed_err"`
+	CheckAt     int64             `json:"check_at"` // last health check
+	Services    map[string]SvcRes `json:"services"`
+	Quality     string            `json:"quality"` // "" = fine, "slow", "service:NAME"
+	Quarantined bool              `json:"quarantined"`
+	Current     bool              `json:"current"`
+	Pinned      bool              `json:"pinned"`
+	ExitCountry string            `json:"exit_country"`
+	ExitIP      string            `json:"exit_ip"`
+	Allowed     bool              `json:"allowed"` // may carry user traffic (exit country known and not censored)
 }
 
 type Snapshot struct {
@@ -704,7 +799,9 @@ func (c *Checker) Snapshot() Snapshot {
 		s.Nodes = append(s.Nodes, NodeView{
 			Tag: st.Node.Tag(), Name: st.Node.Name, Server: st.Node.Server, Type: st.Node.Type,
 			Score: st.score, LatencyMS: st.ewma, SuccessRate: st.sr, JitterMS: st.jitter,
-			SpeedKbps: st.speedKbps, Current: id == c.current, Pinned: id == c.pinned,
+			SpeedKbps: st.speedKbps, SpeedHist: append([]SpeedPoint(nil), st.speedHist...), SpeedErr: st.speedErr,
+			SpeedAt: unixOrZero(st.speedAt()), SpeedTry: unixOrZero(st.speedTry), CheckAt: unixOrZero(st.checkAt), Services: copySvc(st.svc),
+			Quality: c.qualityIssue(st, time.Now(), c.cfg.getMinSpeed(), c.cfg.getRequired()), Current: id == c.current, Pinned: id == c.pinned,
 			Quarantined: time.Now().Before(st.quarantine) || (st.Node.ExitCountry != "" && c.cfg.exitCheckOn() && c.cfg.isBlocked(st.Node.ExitCountry)),
 			ExitCountry: st.Node.ExitCountry, ExitIP: st.Node.ExitIP, Allowed: st.Node.Allowed(c.cfg),
 		})

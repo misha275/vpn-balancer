@@ -11,9 +11,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+var portRange atomic.Int32
 
 // These tests need the real sing-box binary:
 //
@@ -47,8 +50,9 @@ func coreCfg(t *testing.T) *Config {
 	cfg := testCfg()
 	cfg.SingboxBin = singboxBin(t)
 	cfg.WorkDir = t.TempDir()
-	cfg.ClashAPI = fmt.Sprintf("127.0.0.1:%d", freePort(t))
-	cfg.TestPort = freePort(t)
+	cfg.GatewayBase = 20000 + int(portRange.Add(1))*50 // below the ephemeral range, one block per test
+	cfg.DrainTimeout = 30 * time.Second
+	cfg.DrainUrgent = time.Second
 	cfg.InboundPort = freePort(t)
 	cfg.TestSecret = "s3cret-for-tests"
 	cfg.MinReload = time.Millisecond
@@ -173,6 +177,7 @@ func TestCoreFingerprintIgnoresOrder(t *testing.T) {
 func TestCoreApplyExcludesBrokenNode(t *testing.T) {
 	cfg := coreCfg(t)
 	core := NewCore(cfg)
+	t.Cleanup(core.Stop)
 	good := allProtocolNodes(t)[:3]
 	bad := ParseLinks("ss://no-such-cipher:pw@9.9.9.9:8388#broken") // sing-box rejects unknown methods
 	if len(bad) != 1 {
@@ -261,6 +266,7 @@ func TestCoreEndToEnd(t *testing.T) {
 	store.pool.Exec(ctx, "TRUNCATE checks, switches")
 
 	core := NewCore(cfg)
+	t.Cleanup(core.Stop)
 	active, _, err := core.Apply(nodes, users, "")
 	if err != nil || len(active) != 2 {
 		t.Fatalf("apply: %v (%d active)", err, len(active))

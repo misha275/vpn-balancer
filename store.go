@@ -87,7 +87,7 @@ func (s *Store) UpsertNodes(ctx context.Context, nodes []*Node, source string) e
 // stay in the pool until the grace period ends.
 func (s *Store) ActiveNodes(ctx context.Context, grace time.Duration) ([]*Node, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id,name,type,server,port,outbound,link,exit_ip,exit_country,exit_checked FROM nodes WHERE last_seen > $1 ORDER BY id`,
+		`SELECT id,name,type,server,port,outbound,link,exit_ip,exit_country,exit_checked,speed_hist,speed_try_at,speed_err,check_at,svc FROM nodes WHERE last_seen > $1 ORDER BY id`,
 		time.Now().Add(-grace))
 	if err != nil {
 		return nil, err
@@ -96,9 +96,13 @@ func (s *Store) ActiveNodes(ctx context.Context, grace time.Duration) ([]*Node, 
 	var out []*Node
 	for rows.Next() {
 		n := &Node{}
-		if err := rows.Scan(&n.ID, &n.Name, &n.Type, &n.Server, &n.Port, &n.Outbound, &n.Link, &n.ExitIP, &n.ExitCountry, &n.ExitChecked); err != nil {
+		var hist, svc []byte
+		if err := rows.Scan(&n.ID, &n.Name, &n.Type, &n.Server, &n.Port, &n.Outbound, &n.Link, &n.ExitIP, &n.ExitCountry, &n.ExitChecked,
+			&hist, &n.SpeedTry, &n.SpeedErr, &n.CheckAt, &svc); err != nil {
 			return nil, err
 		}
+		_ = json.Unmarshal(hist, &n.SpeedHist)
+		_ = json.Unmarshal(svc, &n.Svc)
 		n.UDP = n.Type == "hysteria2" || n.Type == "tuic"
 		out = append(out, n)
 	}
@@ -182,6 +186,8 @@ func (s *Store) LastSelected(ctx context.Context) string {
 func (s *Store) Cleanup(ctx context.Context, keep time.Duration) {
 	_, _ = s.pool.Exec(ctx, `DELETE FROM checks WHERE ts < $1`, time.Now().Add(-keep))
 	_, _ = s.pool.Exec(ctx, `DELETE FROM switches WHERE ts < $1`, time.Now().Add(-90*24*time.Hour))
+	_, _ = s.pool.Exec(ctx, `DELETE FROM traffic_hourly WHERE hour < $1`, time.Now().Add(-180*24*time.Hour))
+	_, _ = s.pool.Exec(ctx, `DELETE FROM metrics WHERE ts < $1`, time.Now().Add(-14*24*time.Hour))
 }
 
 // SetExit records where a node's traffic really leaves from.
@@ -288,4 +294,181 @@ func (s *Store) RecentSwitches(ctx context.Context, limit int) ([]SwitchRow, err
 func (s *Store) ForgetExitChecks(ctx context.Context) error {
 	_, err := s.pool.Exec(ctx, `UPDATE nodes SET exit_checked='epoch'`)
 	return err
+}
+
+// ---------------------------------------------------------------- statistics
+
+// AddTraffic adds counters to the bucket of the given hour.
+func (s *Store) AddTraffic(ctx context.Context, at time.Time, m map[string]UserDelta) error {
+	if len(m) == 0 {
+		return nil
+	}
+	hour := at.UTC().Truncate(time.Hour)
+	b := &pgx.Batch{}
+	for name, d := range m {
+		b.Queue(`INSERT INTO traffic_hourly(hour,user_name,up,down,conns) VALUES($1,$2,$3,$4,$5)
+			ON CONFLICT (hour,user_name) DO UPDATE SET up=traffic_hourly.up+EXCLUDED.up, down=traffic_hourly.down+EXCLUDED.down, conns=traffic_hourly.conns+EXCLUDED.conns`,
+			hour, name, d.Up, d.Down, d.Conns)
+	}
+	br := s.pool.SendBatch(ctx, b)
+	defer br.Close()
+	for range m {
+		if _, err := br.Exec(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type SeenInfo struct {
+	At time.Time
+	IP string
+}
+
+func (s *Store) TouchSeen(ctx context.Context, m map[string]SeenInfo) error {
+	if len(m) == 0 {
+		return nil
+	}
+	b := &pgx.Batch{}
+	for name, v := range m {
+		b.Queue(`INSERT INTO user_seen(user_name,last_seen,last_ip) VALUES($1,$2,$3)
+			ON CONFLICT (user_name) DO UPDATE SET last_seen=GREATEST(user_seen.last_seen,EXCLUDED.last_seen), last_ip=CASE WHEN EXCLUDED.last_seen>=user_seen.last_seen THEN EXCLUDED.last_ip ELSE user_seen.last_ip END`,
+			name, v.At, v.IP)
+	}
+	br := s.pool.SendBatch(ctx, b)
+	defer br.Close()
+	for range m {
+		if _, err := br.Exec(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type TrafficSum struct {
+	H24Up, H24Down int64
+	D7Up, D7Down   int64
+	D30Up, D30Down int64
+	AllUp, AllDown int64
+	AllConns       int64
+	LastSeen       time.Time
+	LastIP         string
+}
+
+// TrafficSummary returns the totals for every name that has traffic or was ever seen.
+func (s *Store) TrafficSummary(ctx context.Context) (map[string]*TrafficSum, error) {
+	rows, err := s.pool.Query(ctx, `SELECT user_name,
+		COALESCE(SUM(up) FILTER (WHERE hour > now()-interval '24 hours'),0), COALESCE(SUM(down) FILTER (WHERE hour > now()-interval '24 hours'),0),
+		COALESCE(SUM(up) FILTER (WHERE hour > now()-interval '7 days'),0),   COALESCE(SUM(down) FILTER (WHERE hour > now()-interval '7 days'),0),
+		COALESCE(SUM(up) FILTER (WHERE hour > now()-interval '30 days'),0),  COALESCE(SUM(down) FILTER (WHERE hour > now()-interval '30 days'),0),
+		COALESCE(SUM(up),0), COALESCE(SUM(down),0), COALESCE(SUM(conns),0)
+		FROM traffic_hourly GROUP BY user_name`)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]*TrafficSum{}
+	for rows.Next() {
+		var n string
+		t := &TrafficSum{}
+		if err := rows.Scan(&n, &t.H24Up, &t.H24Down, &t.D7Up, &t.D7Down, &t.D30Up, &t.D30Down, &t.AllUp, &t.AllDown, &t.AllConns); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out[n] = t
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	r2, err := s.pool.Query(ctx, `SELECT user_name,last_seen,last_ip FROM user_seen`)
+	if err != nil {
+		return nil, err
+	}
+	defer r2.Close()
+	for r2.Next() {
+		var n, ip string
+		var ts time.Time
+		if err := r2.Scan(&n, &ts, &ip); err != nil {
+			return nil, err
+		}
+		t := out[n]
+		if t == nil {
+			t = &TrafficSum{}
+			out[n] = t
+		}
+		t.LastSeen, t.LastIP = ts, ip
+	}
+	return out, r2.Err()
+}
+
+func (s *Store) InsertMetric(ctx context.Context, m SysSample) error {
+	_, err := s.pool.Exec(ctx, `INSERT INTO metrics(ts,cpu,mem,disk,load1,up,down,conns,users) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+		ON CONFLICT (ts) DO NOTHING`, time.Unix(m.T, 0), m.CPU, m.Mem, m.Disk, m.Load1, m.Up, m.Down, m.Conns, m.Users)
+	return err
+}
+
+func (s *Store) LoadMetrics(ctx context.Context, since time.Time) ([]SysSample, error) {
+	rows, err := s.pool.Query(ctx, `SELECT ts,cpu,mem,disk,load1,up,down,conns,users FROM metrics WHERE ts >= $1 ORDER BY ts`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SysSample
+	for rows.Next() {
+		var ts time.Time
+		var m SysSample
+		if err := rows.Scan(&ts, &m.CPU, &m.Mem, &m.Disk, &m.Load1, &m.Up, &m.Down, &m.Conns, &m.Users); err != nil {
+			return nil, err
+		}
+		m.T = ts.Unix()
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// NodeStat is the quality data of one node that is kept in the database.
+type NodeStat struct {
+	ID        string
+	SpeedHist []SpeedPoint
+	SpeedTry  time.Time
+	SpeedErr  string
+	CheckAt   time.Time
+	Svc       map[string]SvcRes
+}
+
+func (s *Store) SaveNodeStats(ctx context.Context, list []NodeStat) error {
+	if len(list) == 0 {
+		return nil
+	}
+	b := &pgx.Batch{}
+	for _, n := range list {
+		hist, _ := json.Marshal(n.SpeedHist)
+		if n.SpeedHist == nil {
+			hist = []byte("[]")
+		}
+		svc, _ := json.Marshal(n.Svc)
+		if n.Svc == nil {
+			svc = []byte("{}")
+		}
+		b.Queue(`UPDATE nodes SET speed_hist=$2, speed_try_at=$3, speed_err=$4, check_at=$5, svc=$6 WHERE id=$1`,
+			n.ID, hist, n.SpeedTry, n.SpeedErr, n.CheckAt, svc)
+	}
+	br := s.pool.SendBatch(ctx, b)
+	defer br.Close()
+	for range list {
+		if _, err := br.Exec(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// DeleteUser removes a user for good (traffic history stays under the name). It reports whether the user existed.
+func (s *Store) DeleteUser(ctx context.Context, name string) (bool, error) {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM users WHERE name=$1`, name)
+	if err == nil && tag.RowsAffected() > 0 { // the user's counters go with the user
+		_, _ = s.pool.Exec(ctx, `DELETE FROM traffic_hourly WHERE user_name=$1`, name)
+		_, _ = s.pool.Exec(ctx, `DELETE FROM user_seen WHERE user_name=$1`, name)
+	}
+	return tag.RowsAffected() > 0, err
 }

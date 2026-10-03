@@ -20,7 +20,7 @@ NATIVE=${SMOKE_NATIVE:-0}           # 1 = режим разработчика: �
 DB_PORT=55432
 UP_A=18388; UP_B=18390; UP_C=18392; UP_DEAD=18399
 CLIENT_PORT=18081
-GEO_PORT=18095; USUB_PORT=18097; SLOW_PORT=18098; DIRECT_PORT=18099; BLOCK_PORT=18096
+GEO_PORT=18095; USUB_PORT=18097; SLOW_PORT=18098; DIRECT_PORT=18099; BLOCK_PORT=18096; STREAM_PORT=18100
 SUB_PORT=${SMOKE_SUB_PORT:-18080}
 SUB_URL_REAL=""
 FAILS=0
@@ -108,9 +108,9 @@ cleanup() {
     ids=$(docker ps -aq --filter label=com.docker.compose.project=smoke 2>/dev/null)
     [ -n "$ids" ] && docker rm -f $ids >/dev/null 2>&1
     for n in up-a up-b up-c client rt-server rt-client; do docker rm -f "smoke-$n" >/dev/null 2>&1; done
-    docker volume rm -f smoke_balancer-data >/dev/null 2>&1
+    docker volume rm -f smoke_balancer-data smoke_gateway-data >/dev/null 2>&1
   fi
-  for f in sub geo slow; do [ -f "$WORK/pids/$f" ] && kill "$(cat "$WORK/pids/$f")" 2>/dev/null; done
+  for f in sub geo slow stream; do [ -f "$WORK/pids/$f" ] && kill "$(cat "$WORK/pids/$f")" 2>/dev/null; done
 }
 if [ "${1:-}" = "--cleanup" ]; then cleanup; rm -rf "$WORK"; echo "cleaned"; exit 0; fi
 [ -n "${1:-}" ] && SUB_URL_REAL=$1
@@ -134,7 +134,7 @@ if [ "$NATIVE" != 1 ]; then
   docker info >/dev/null 2>&1 || { res FAIL "демон Docker не запущен"; exit 2; }
   log "docker: $(docker --version); $(docker compose version --short)"
 fi
-for p in 443 8080 9090 2080 $DB_PORT $SUB_PORT $UP_A $UP_B $UP_C $CLIENT_PORT $GEO_PORT $USUB_PORT $SLOW_PORT $DIRECT_PORT $BLOCK_PORT 18443 18082; do
+for p in 443 8080 9000 21001 9090 2080 $STREAM_PORT $DB_PORT $SUB_PORT $UP_A $UP_B $UP_C $CLIENT_PORT $GEO_PORT $USUB_PORT $SLOW_PORT $DIRECT_PORT $BLOCK_PORT 18443 18082; do
   if ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$p$"; then res FAIL "порт $p уже занят" "освободите его или скажите, какой заменить"; exit 2; fi
 done
 
@@ -282,7 +282,8 @@ rules:
   - action: block
     match: ["port:$BLOCK_PORT"]
 EOF
-if [ "$NATIVE" = 1 ]; then printf 'singbox_bin: %s\nwork_dir: %s\n' "$WORK/sb-bin/sing-box" "$WORK/data" >> "$WORK/config.yaml"; fi
+if [ "$NATIVE" = 1 ]; then printf 'singbox_bin: %s\nwork_dir: %s\n' "$WORK/sb-bin/sing-box" "$WORK/data" >> "$WORK/config.yaml"
+else printf 'gateway: external\ngateway_url: http://127.0.0.1:9000\ndrain_timeout: 200s\ndrain_urgent: 3s\n' >> "$WORK/config.yaml"; fi
 
 # docker-режим: compose с host-сетью (всё общается через 127.0.0.1)
 cat > "$COMPOSE" <<EOF
@@ -300,10 +301,22 @@ services:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p $DB_PORT -U balancer"]
       interval: 3s
       retries: 20
+  gateway:
+    build:
+      context: ..
+      network: host
+    image: smoke-gateway
+    command: ["gateway"]
+    restart: "no"
+    network_mode: host
+    volumes:
+      - ./config.yaml:/etc/balancer/config.yaml:ro
+      - gateway-data:/var/lib/balancer
   balancer:
     build:
       context: ..
       network: host
+    image: smoke-balancer
     restart: "no"
     network_mode: host
     environment:
@@ -311,11 +324,14 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      gateway:
+        condition: service_started
     volumes:
       - ./config.yaml:/etc/balancer/config.yaml:ro
       - balancer-data:/var/lib/balancer
 volumes:
   balancer-data:
+  gateway-data:
 EOF
 
 # ---------- 2. запуск ----------
@@ -401,7 +417,7 @@ if wait_for 120 'has_node ss-c'; then res PASS "новый узел из обн�
 if wait_for 120 '[ "$(score_of ss-c)" != 0 ] && [ "$(score_of ss-c)" != -1 ]'; then res PASS "новый узел проверен и получил оценку"; else res INFO "ss-c ещё без оценки"; fi
 sleep 12
 if wait_for 90 client_ok; then res PASS "после смены набора узлов (reload sing-box) клиент продолжает работать"; else res FAIL "после reload клиент не работает"; fi
-bal_logs | grep -q 'config reloaded' && res PASS "reload конфига выполнен (есть в логе)" || res INFO "строки 'config reloaded' нет в логе"
+bal_logs | grep -q 'new configuration is live' && res PASS "переключение на новую конфигурацию выполнено (есть в логе)" || res INFO "строки 'new configuration is live' нет в логе"
 
 # ---------- 7. tier3 (скорость) ----------
 if wait_for 150 '[ "$(status | jq "[.nodes[]|select(.speed_kbps>0)]|length")" -ge 1 ]'; then res PASS "tier3: скорость измерена" "$(status | jq -r '[.nodes[]|select(.speed_kbps>0)][0]|"\(.name) \(.speed_kbps) кбит/с"')"
@@ -429,7 +445,13 @@ echo "$SUBTXT" | grep -q '%5BNL%5D' && res PASS "в названиях узло�
 [ "$(curl -s -m 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$USUB_PORT/sub/deadbeef")" = 404 ] && res PASS "неверный токен подписки даёт 404" || res FAIL "неверный токен подписки не отклонён"
 
 # ---------- 8b. правила фильтра ----------
-chains() { curl -s -m 3 "http://127.0.0.1:9090/connections" | jq -c --arg p "$1" '[.connections[]|select(.metadata.destinationPort==$p)|.chains]|first // []' 2>/dev/null; }
+# Clash API живого экземпляра sing-box: порт сообщает шлюз, секрет выводится из ключа Reality (как в программе)
+GWSEC=$(printf 'vpn-balancer|gateway' | openssl dgst -sha256 -hmac "$PRIV" | awk '{print $NF}' | cut -c1-40)
+chains() {
+  [ -z "${ATOK:-}" ] && ATOK=$(bal_cli token 2>/dev/null | tr -d '\r\n')
+  local cp; cp=$(curl -s -m 5 -H "Authorization: Bearer $ATOK" http://127.0.0.1:8080/api/overview | jq -r '.gateway.clash_port // empty')
+  curl -s -m 3 -H "Authorization: Bearer $GWSEC" "http://127.0.0.1:${cp:-9090}/connections" | jq -c --arg p "$1" '[.connections[]|select(.metadata.destinationPort==$p)|.chains]|first // []' 2>/dev/null
+}
 rpids=()
 for P in $SLOW_PORT $DIRECT_PORT; do
   ( curlx -s -m 14 -x "socks5h://127.0.0.1:$CLIENT_PORT" "http://127.0.0.1:$P/" > "$WORK/logs/rule-$P.out" 2>&1 ) &
@@ -476,6 +498,16 @@ bal_cli set default_action direct >/dev/null 2>&1 && res FAIL "default_action=di
 bal_cli set switch_confirm 99 >/dev/null 2>&1 && res FAIL "switch_confirm=99 принят" || res PASS "неверное значение настройки отклонено"
 bal_cli set switch_confirm 4 >/dev/null 2>&1; sleep 1
 [ "$(bal_cli get switch_confirm 2>/dev/null | tr -d ' \n')" = 4 ] && res PASS "set/get: настройка сохранена в базе" || res FAIL "set/get не работает"
+# статистика: трафик пользователей, метрики сервера, консоль
+ST=$(curl -s -m 8 -H "Authorization: Bearer $ATOK" http://127.0.0.1:8080/api/stats)
+echo "$ST" | jq -e '.sys.mem_total>0 and .sys.disk_total>0 and .static.cpus>=1' >/dev/null 2>&1 && res PASS "статистика: процессор/память/диск сервера измерены" "$(echo "$ST" | jq -c '.sys|{cpu,mem,disk}')" || res FAIL "статистика сервера не отдаётся" "${ST:0:200}"
+echo "$ST" | jq -e '[.users[]|select((.all_down+.all_up)>0)]|length>=1' >/dev/null 2>&1 && res PASS "статистика: трафик пользователя посчитан по имени" "$(echo "$ST" | jq -c '[.users[]|{name,all_down,all_up,all_conns}]')" || res FAIL "трафик пользователей не посчитан" "$(echo "$ST" | jq -c '{users,gateway_error}' | cut -c1-300)"
+[ "$(curl -s -m 8 -H "Authorization: Bearer $ATOK" 'http://127.0.0.1:8080/api/stats/history?range=1h' | jq '.points|length')" -ge 2 ] && res PASS "статистика: история для графиков накапливается" || res FAIL "история графиков пуста"
+curl -s -m 8 -H "Authorization: Bearer $ATOK" 'http://127.0.0.1:8080/api/logs?src=gateway&limit=20' | jq -e '.epoch>0 and (.lines|length)>=1' >/dev/null 2>&1 && res PASS "консоль шлюза отдаёт строки" || res FAIL "консоль шлюза пуста"
+curl -s -m 8 -H "Authorization: Bearer $ATOK" 'http://127.0.0.1:8080/api/logs?src=controller&limit=20' | jq -e '(.lines|length)>=1' >/dev/null 2>&1 && res PASS "консоль контроллера отдаёт строки" || res FAIL "консоль контроллера пуста"
+bal_cli stats 2>&1 | grep -q 'ПОЛЬЗОВАТЕЛЬ' && res PASS "команда stats работает" || res FAIL "команда stats не работает"
+bal_cli logs gateway -n 5 >/dev/null 2>&1 && res PASS "команда logs работает" || res FAIL "команда logs не работает"
+{ bal_logs; [ "$NATIVE" != 1 ] && DB_PASSWORD=$DB_PASSWORD "${DCP[@]}" logs --no-color gateway 2>&1; } | grep -c 'inbound connection to' | grep -qx 0 && res PASS "в логах нет строк о том, какие сайты открывают пользователи" || res FAIL "в логах появляются адреса назначения пользователей"
 curl -s -m 5 -X PUT -H "Authorization: Bearer $ATOK" -d '{"switch_confirm":3}' http://127.0.0.1:8080/api/settings | jq -e '.values.switch_confirm==3' >/dev/null && res PASS "PUT /api/settings применяет настройку сразу" || res FAIL "PUT /api/settings не работает"
 curl -s -m 5 -X PUT -H "Authorization: Bearer $ATOK" -d '{"rules":[{"action":"direct","match":["bad domain"]}]}' http://127.0.0.1:8080/api/settings | jq -e '.error' >/dev/null && res PASS "неверное правило отклонено с понятной ошибкой" || res FAIL "неверное правило принято"
 # правило, добавленное командой, начинает действовать без перезапуска
@@ -489,6 +521,55 @@ bal_cli rules list 2>&1 | grep -q "port:$SLOW_PORT" && res FAIL "rules del не 
 bal_cli countries block FR >/dev/null 2>&1; bal_cli countries list 2>&1 | grep -q 'FR' && res PASS "countries block добавляет страну" || res FAIL "countries block не работает"
 bal_cli countries allow FR >/dev/null 2>&1; bal_cli countries list 2>&1 | grep 'запрещённые' | grep -q 'FR' && res FAIL "countries allow не убрал страну" || res PASS "countries allow убирает страну"
 wait_for 120 client_ok && res PASS "после изменений настроек пользователь по-прежнему проходит" || res FAIL "после изменений настроек клиент не проходит"
+
+
+# ---------- 8e. бесшовность: открытое соединение переживает смену конфигурации и перезапуск контроллера ----------
+if [ "$NATIVE" != 1 ]; then
+  cat > "$WORK/stream.py" <<'PY'
+import sys, time, http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.send_header("Content-Type", "text/plain"); self.end_headers()
+        for i in range(int(sys.argv[2])):
+            try:
+                self.wfile.write(b"x"); self.wfile.flush()
+            except Exception:
+                return
+            time.sleep(1)
+    def log_message(self, *a): pass
+http.server.ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PY
+  python3 "$WORK/stream.py" $STREAM_PORT 110 >/dev/null 2>&1 & echo $! > "$WORK/pids/stream"
+  sleep 1
+  gw_gen()   { curl -s -m 5 -H "Authorization: Bearer $ATOK" http://127.0.0.1:8080/api/overview | jq -r '.gateway.gen // empty'; }
+  gw_slots() { curl -s -m 5 -H "Authorization: Bearer $ATOK" http://127.0.0.1:8080/api/overview | jq -r '.gateway.slots|length // empty'; }
+  wait_for 60 '[ "$(gw_slots)" = 1 ]' >/dev/null   # старые экземпляры прошлых проверок уже завершились
+  rm -f "$WORK/stream.size"
+  ( curlx -s -m 170 -x "socks5h://127.0.0.1:$CLIENT_PORT" -o /dev/null -w '%{size_download}' "http://127.0.0.1:$STREAM_PORT/" > "$WORK/stream.size" 2>/dev/null ) &
+  spid=$!
+  sleep 4
+  g0=$(gw_gen)
+  log "длинное соединение запущено (110 c); меняю конфигурацию: новый пользователь (ждём переключения шлюза)"
+  bal_cli adduser smoke-seamless >/dev/null 2>&1
+  if wait_for 150 '[ -n "$(gw_gen)" ] && [ "$(gw_gen)" != "$g0" ]'; then res PASS "шлюз включил новую конфигурацию на втором экземпляре sing-box"; else res FAIL "шлюз не переключился на новую конфигурацию за 150 с"; fi
+  [ "$(gw_slots)" -ge 2 ] 2>/dev/null && res PASS "старый экземпляр продолжает обслуживать открытое соединение" "экземпляров: $(gw_slots)" || res FAIL "старый экземпляр остановлен, пока соединение открыто" "экземпляров: $(gw_slots)"
+  client_ok && res PASS "новые подключения сразу проходят на новой конфигурации" || res FAIL "новое подключение не прошло сразу после переключения"
+  g1=$(gw_gen)
+  log "перезапускаю контроллер, пока соединение открыто"
+  bal_restart
+  wait_for 120 'curl -sf -m 3 http://127.0.0.1:8080/healthz | grep -q ok' && res PASS "контроллер перезапустился при открытом соединении" || res FAIL "контроллер не поднялся"
+  sleep 8
+  [ "$(gw_gen)" = "$g1" ] && res PASS "новый контроллер принял работающую конфигурацию без переключения" || res INFO "после перезапуска шлюз всё же переключился (набор узлов изменился)" "gen $g1 -> $(gw_gen)"
+  client_ok && res PASS "клиент работает после перезапуска контроллера (шлюз не останавливался)" || res FAIL "клиент не работает после перезапуска контроллера"
+  wait $spid
+  sz=$(cat "$WORK/stream.size" 2>/dev/null)
+  [ "$sz" = 110 ] && res PASS "длинное соединение пережило смену конфигурации и перезапуск контроллера" "получено 110 из 110 байт" || res FAIL "длинное соединение оборвалось" "получено ${sz:-0} из 110 байт"
+  wait_for 120 '[ "$(gw_slots)" = 1 ]' && res PASS "после завершения соединения старый экземпляр остановлен" || res FAIL "старый экземпляр не остановлен" "экземпляров: $(gw_slots)"
+  log "перезапускаю контейнер шлюза: он должен сам вернуть последнюю конфигурацию"
+  DB_PASSWORD=$DB_PASSWORD "${DCP[@]}" restart gateway >/dev/null 2>&1
+  wait_for 90 client_ok && res PASS "шлюз после перезапуска сам вернул последнюю конфигурацию, клиент проходит" || res FAIL "после перезапуска шлюза клиент не проходит"
+  bal_cli deluser smoke-seamless >/dev/null 2>&1
+fi
 
 # ---------- 9. отключение пользователя ----------
 bal_cli deluser smoke-user >/dev/null 2>&1
@@ -539,6 +620,7 @@ fi
 status | jq . > "$WORK/status.json" 2>/dev/null
 curl -s -m 5 http://127.0.0.1:8080/metrics > "$WORK/metrics.txt" 2>/dev/null
 bal_logs > "$WORK/logs/balancer.full.log" 2>&1
+[ "$NATIVE" != 1 ] && DB_PASSWORD=$DB_PASSWORD "${DCP[@]}" logs --no-color gateway > "$WORK/logs/gateway.full.log" 2>&1
 [ "$NATIVE" != 1 ] && { "${DCP[@]}" ps -a > "$WORK/logs/compose-ps.txt" 2>&1; docker logs smoke-client > "$WORK/logs/client.log" 2>&1; tail -60 "$WORK/build.log" > "$WORK/logs/build-tail.log"; }
 db_q "select to_char(ts,'HH24:MI:SS'), from_node, to_node, reason from switches order by ts" > "$WORK/logs/switches.txt" 2>&1
 db_q "select tier, ok, count(*) from checks group by 1,2 order by 1,2" > "$WORK/logs/checks-summary.txt" 2>&1
