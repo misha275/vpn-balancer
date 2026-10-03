@@ -1,0 +1,64 @@
+# Копия этого файла -> config.yaml. Значения в <...> заполните.
+database_url: postgres://balancer:${DB_PASSWORD}@postgres:5432/balancer   # подставьте пароль (или задайте env DATABASE_URL)
+
+subscriptions:
+  - https://example.com/sub/aaa
+  - https://example.com/sub/bbb
+
+sub_refresh: 30m
+node_grace: 48h            # узел остаётся в пуле столько после исчезновения из подписки
+
+# --- то, что видит пользователь (единый адрес шлюза) ---
+public_host: <IP или домен вашего сервера>
+inbound_port: 443
+reality:
+  # sing-box generate reality-keypair  ->  private_key / public_key
+  private_key: <PRIVATE_KEY>
+  public_key: <PUBLIC_KEY>
+  short_id: <openssl rand -hex 8>
+  handshake_server: www.microsoft.com
+  handshake_port: 443
+
+# --- проверки ---
+tier1_interval: 1m         # TCP-доступность
+tier2_interval: 3m         # реальные HTTPS-запросы через узел
+tier3_interval: 45m        # тест скорости
+tier3_top: 5
+watch_interval: 5s         # быстрая проверка текущего узла
+switch_margin: 1.15        # новый узел должен быть лучше на 15%...
+switch_confirm: 3          # ...в течение 3 циклов tier2 подряд
+probe_urls:
+  - https://www.gstatic.com/generate_204
+  - https://cp.cloudflare.com/generate_204
+  - https://www.youtube.com/generate_204
+  # добавьте сайты, которые важны вашим пользователям
+
+# --- страна выхода: куда узел выпускает трафик на самом деле ---
+exit_check: true           # измерять страну выхода каждого узла; узлы с запрещённым/неизвестным выходом не используются
+# blocked_exit_countries: [RU, UA, BY, CN, IR, SY, KP, TM, CU, MM]   # по умолчанию именно эти
+# geo_urls: [https://ipinfo.io/json, https://api.country.is, https://ifconfig.co/json]
+# geo_ttl: 6h
+# geo_blocked_ttl: 30m     # как скоро перемерить узел, у которого выход оказался в запрещённой стране
+# node_identity: endpoint  # link = каждая ссылка подписки отдельным узлом (даже с одинаковыми параметрами)
+
+# --- правила для трафика пользователей (сверху вниз, срабатывает первое подошедшее) ---
+# По умолчанию всё идёт через балансировщик. Напрямую с самого сервера: только то, что вы явно разрешили.
+# Сервер находится в России, поэтому российские сайты удобно открывать напрямую через него:
+rules:
+  - action: direct         # direct | block | proxy
+    match: ["*.ru", "*.su", "*.xn--p1ai"]    # зоны .ru, .su, .рф
+#  - action: block
+#    match: ["port:25", "100.200.255.0/24"]
+default_action: proxy      # proxy | block (режим белого списка)
+
+# --- подписка для пользователей: первый сервер балансировщик, дальше проверенные узлы ---
+gateway_name: Балансировщик
+# sub_listen: 0.0.0.0:8081                      # раскомментируйте, чтобы включить; порт откройте в docker-compose.yml
+# sub_public_url: https://vpn.example.com:8081  # как этот адрес виден снаружи
+# sub_tls_cert: /etc/balancer/certs/fullchain.pem  # HTTPS настоятельно рекомендуется
+# sub_tls_key: /etc/balancer/certs/privkey.pem
+
+telegram_token: ""
+telegram_chat: ""
+
+http_listen: 0.0.0.0:8080  # внутри контейнера; наружу проброшен только на 127.0.0.1

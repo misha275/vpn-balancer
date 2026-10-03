@@ -1,0 +1,40 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: balancer
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: balancer
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U balancer"]
+      interval: 5s
+      retries: 10
+
+  balancer:
+    build: .
+    restart: always
+    environment:
+      DB_PASSWORD: ${DB_PASSWORD}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "443:443"
+      - "127.0.0.1:8080:8080"
+      # - "8081:8081"     # выдача подписок пользователям (включите sub_listen в config.yaml)
+    volumes:
+      - ./config.yaml:/etc/balancer/config.yaml:ro
+      - balancer-data:/var/lib/balancer
+      # - ./certs:/etc/balancer/certs:ro   # сертификат для sub_tls_cert / sub_tls_key
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  pgdata:
+  balancer-data:

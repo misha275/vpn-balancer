@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Балансировщик VPN</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--text:#1b1f24;--muted:#69727d;--line:#e3e6ea;--accent:#2563eb;--ok:#15803d;--warn:#b45309;--bad:#b91c1c;--chip:#eef1f5}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1317;--card:#171c22;--text:#e6e9ed;--muted:#8b95a1;--line:#2a313a;--accent:#6ea0ff;--ok:#4ade80;--warn:#fbbf24;--bad:#f87171;--chip:#222a33}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{display:flex;gap:16px;align-items:center;flex-wrap:wrap;padding:12px 20px;background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+h1{font-size:16px;margin:0 8px 0 0}
+nav{display:flex;gap:4px;flex-wrap:wrap}
+nav button{background:none;border:0;padding:7px 12px;border-radius:8px;color:var(--muted);cursor:pointer;font:inherit}
+nav button.on{background:var(--chip);color:var(--text);font-weight:600}
+main{max-width:1180px;margin:0 auto;padding:18px 20px 60px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin-bottom:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:14px}
+.grid .card{margin:0}
+.k{color:var(--muted);font-size:12px}.v{font-size:20px;font-weight:650;margin-top:2px;word-break:break-word}
+h2{font-size:15px;margin:0 0 10px}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:600;font-size:12px;cursor:pointer;white-space:nowrap}
+tr:last-child td{border-bottom:0}
+.tw{overflow-x:auto}
+button.b,input,select,textarea{font:inherit;color:var(--text)}
+button.b{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:7px 12px;cursor:pointer}
+button.b.s{background:var(--chip);color:var(--text)}
+button.b.d{background:transparent;color:var(--bad);border:1px solid var(--line)}
+button.b:disabled{opacity:.5;cursor:default}
+input,select,textarea{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:7px 9px;width:100%}
+textarea{min-height:90px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.row>*{flex:0 0 auto}
+.row .grow{flex:1 1 220px}
+.pill{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;background:var(--chip)}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.muted{color:var(--muted)}
+.chip{display:inline-flex;gap:6px;align-items:center;background:var(--chip);border-radius:99px;padding:2px 4px 2px 10px;margin:0 6px 6px 0}
+.chip button{border:0;background:none;color:var(--muted);cursor:pointer;font-size:15px;line-height:1}
+.rule{border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:10px}
+.hint{color:var(--muted);font-size:12.5px;margin:4px 0 10px}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;word-break:break-all}
+#toast{position:fixed;right:16px;bottom:16px;max-width:420px;background:var(--text);color:var(--bg);padding:10px 14px;border-radius:10px;display:none;z-index:9}
+#login{max-width:420px;margin:12vh auto}
+.hidden{display:none!important}
+</style>
+</head>
+<body>
+<div id="login" class="card hidden">
+  <h2>Вход в панель</h2>
+  <p class="hint">Токен показывает команда <span class="mono">balancer token</span> (внутри контейнера: <span class="mono">docker compose exec balancer balancer -c /etc/balancer/config.yaml token</span>).</p>
+  <div class="row"><input id="tok" type="password" class="grow" placeholder="токен" autocomplete="off"><button class="b" id="tokgo">Войти</button></div>
+  <p id="tokerr" class="bad"></p>
+</div>
+
+<div id="app" class="hidden">
+<header>
+  <h1>Балансировщик VPN</h1>
+  <nav id="nav"></nav>
+  <span style="flex:1"></span>
+  <span id="state" class="pill">…</span>
+  <button class="b s" id="logout">Выйти</button>
+</header>
+<main id="main"></main>
+</div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+const $ = (s, r=document) => r.querySelector(s);
+function h(tag, attrs, ...kids){
+  const e = document.createElement(tag);
+  for (const [k,v] of Object.entries(attrs||{})){
+    if (k==="class") e.className=v; else if (k==="onclick") e.onclick=v; else if (k==="onchange") e.onchange=v; else if (k==="oninput") e.oninput=v;
+    else if (v===true) e.setAttribute(k,""); else if (v!==false && v!=null) e.setAttribute(k,v);
+  }
+  for (const c of kids.flat()){ if (c==null||c===false) continue; e.append(c.nodeType?c:document.createTextNode(String(c))); }
+  return e;
+}
+let TOKEN = sessionStorage.getItem("tok")||"";
+let TAB = "overview", DATA = null, SET = null, USERS = null;
+let nodeFilter = "", nodeState = "all", sortKey = "score", sortDir = -1;
+
+function toast(msg, bad){ const t=$("#toast"); t.textContent=msg; t.style.background=bad?"var(--bad)":""; t.style.color=bad?"#fff":""; t.style.display="block"; clearTimeout(toast.t); toast.t=setTimeout(()=>t.style.display="none",4500); }
+async function api(method, path, body){
+  const r = await fetch(path,{method,headers:{"Authorization":"Bearer "+TOKEN,"Content-Type":"application/json"},body:body===undefined?undefined:JSON.stringify(body)});
+  let j=null; try{ j=await r.json(); }catch(e){}
+  if (r.status===401){ logout(true); throw new Error("нужен токен"); }
+  if (!r.ok) throw new Error((j&&j.error)||("HTTP "+r.status));
+  return j;
+}
+function logout(showErr){ sessionStorage.removeItem("tok"); TOKEN=""; $("#app").classList.add("hidden"); $("#login").classList.remove("hidden"); $("#tokerr").textContent=showErr?"Токен не подошёл":""; }
+$("#logout").onclick=()=>logout(false);
+$("#tokgo").onclick=async()=>{ TOKEN=$("#tok").value.trim(); try{ await api("GET","/api/overview"); sessionStorage.setItem("tok",TOKEN); start(); }catch(e){ $("#tokerr").textContent=e.message; } };
+$("#tok").addEventListener("keydown",e=>{ if(e.key==="Enter") $("#tokgo").click(); });
+
+const TABS=[["overview","Обзор"],["nodes","Узлы"],["settings","Настройки"],["users","Пользователи"]];
+function renderNav(){ const n=$("#nav"); n.replaceChildren(...TABS.map(([id,t])=>h("button",{class:id===TAB?"on":"",onclick:()=>{TAB=id;load();}},t))); }
+
+async function load(){
+  renderNav();
+  try{
+    if (TAB==="overview"||TAB==="nodes"){ DATA=await api("GET","/api/overview"); }
+    if (TAB==="settings"){ SET=await api("GET","/api/settings"); }
+    if (TAB==="users"){ USERS=await api("GET","/api/users"); }
+    if (!DATA) DATA=await api("GET","/api/overview");
+  }catch(e){ if(TOKEN) toast(e.message,true); return; }
+  const s=DATA.snapshot, st=$("#state");
+  st.textContent = !DATA.ready ? "sing-box не отвечает" : s.net_down ? "нет связи у сервера" : "работает";
+  st.className="pill "+(!DATA.ready||s.net_down?"bad":"ok");
+  render();
+}
+function render(){ const m=$("#main"); m.replaceChildren(({overview:vOverview,nodes:vNodes,settings:vSettings,users:vUsers})[TAB]()); }
+
+function fmtSpeed(k){ return k>0? (k>=1000? (k/1000).toFixed(0)+" Мбит/с": k+" кбит/с") : "—"; }
+function nodeStatus(n){
+  if (n.current) return ["текущий","ok"]; if (n.pinned) return ["закреплён","ok"];
+  if (n.exit_country && !n.allowed) return ["исключён: "+n.exit_country,"bad"];
+  if (!n.exit_country && n.allowed===false) return ["страна не определена","warn"];
+  if (n.quarantined) return ["карантин","warn"]; if (n.score<=0) return ["не работает","bad"]; return ["в резерве","muted"];
+}
+function card(k,v,cls){ return h("div",{class:"card"},h("div",{class:"k"},k),h("div",{class:"v "+(cls||"")},v)); }
+
+function vOverview(){
+  const s=DATA.snapshot, nodes=s.nodes||[];
+  const alive=nodes.filter(n=>n.score>0&&n.allowed).length, excl=nodes.filter(n=>!n.allowed).length;
+  const cur=nodes.find(n=>n.current);
+  const cc={}; nodes.forEach(n=>{ const c=n.exit_country||"?"; cc[c]=(cc[c]||0)+1; });
+  return h("div",{},
+    h("div",{class:"grid"},
+      card("Текущий узел", s.current||"нет", s.current?"":"bad"),
+      card("Выход текущего", cur? ((cur.exit_country||"?")+" "+(cur.exit_ip||"")) : "—"),
+      card("Закреплён", s.pinned||"автоматический выбор"),
+      card("Узлов всего", nodes.length),
+      card("Допущено и живых", alive, alive?"ok":"bad"),
+      card("Исключено по стране", excl, excl?"warn":""),
+      card("Переключений", s.switches)),
+    h("div",{class:"card"},h("h2",{},"Страны выхода"),
+      h("div",{}, Object.entries(cc).sort((a,b)=>b[1]-a[1]).map(([c,n])=>h("span",{class:"chip",style:"padding-right:10px"},c+" × "+n)))),
+    h("div",{class:"card"},h("h2",{},"Действия"),
+      h("div",{class:"row"},
+        h("button",{class:"b s",onclick:()=>act("/api/refresh")},"Скачать подписки сейчас"),
+        h("button",{class:"b s",onclick:()=>act("/api/recheck")},"Перемерить страны выхода"),
+        s.pinned? h("button",{class:"b",onclick:()=>act("/api/pin",{node:""})},"Снять закрепление"):null)),
+    h("div",{class:"card"},h("h2",{},"Последние переключения"),
+      h("div",{class:"tw"},h("table",{},h("tr",{},h("th",{},"Когда"),h("th",{},"Откуда"),h("th",{},"Куда"),h("th",{},"Причина")),
+        (DATA.switches||[]).map(r=>h("tr",{},h("td",{},new Date(r.ts).toLocaleString()),h("td",{},r.from||"—"),h("td",{},r.to),h("td",{},({failover:"отказ узла",better:"узел лучше",pinned:"закреплён вручную"})[r.reason]||r.reason)))))));
+}
+async function act(path, body){ try{ const r=await api("POST",path,body||{}); toast(r.ok||"готово"); setTimeout(load,800);}catch(e){ toast(e.message,true);} }
+
+function vNodes(){
+  const s=DATA.snapshot; let rows=(s.nodes||[]).slice();
+  const q=nodeFilter.toLowerCase();
+  rows=rows.filter(n=>!q||(n.name+" "+n.server+" "+(n.exit_country||"")).toLowerCase().includes(q));
+  if (nodeState==="allowed") rows=rows.filter(n=>n.allowed&&n.score>0);
+  if (nodeState==="excluded") rows=rows.filter(n=>!n.allowed);
+  if (nodeState==="dead") rows=rows.filter(n=>n.score<=0);
+  rows.sort((a,b)=>{ const x=a[sortKey],y=b[sortKey]; return (x>y?1:x<y?-1:0)*sortDir; });
+  const th=(k,t)=>h("th",{onclick:()=>{ if(sortKey===k) sortDir=-sortDir; else {sortKey=k;sortDir=-1;} render(); }},t+(sortKey===k?(sortDir<0?" ↓":" ↑"):""));
+  return h("div",{},
+    h("div",{class:"row",style:"margin-bottom:12px"},
+      h("input",{class:"grow",placeholder:"поиск по названию, адресу, стране",value:nodeFilter,oninput:e=>{nodeFilter=e.target.value; render(); const i=$("input.grow"); i.focus(); i.setSelectionRange(99,99);}}),
+      h("select",{style:"width:auto",onchange:e=>{nodeState=e.target.value;render();}},
+        [["all","все"],["allowed","допущены и живы"],["excluded","исключены по стране"],["dead","не работают"]].map(([v,t])=>h("option",{value:v,selected:v===nodeState},t))),
+      h("span",{class:"muted"},rows.length+" из "+(s.nodes||[]).length)),
+    h("div",{class:"card tw"},h("table",{},
+      h("tr",{},th("name","Название"),th("exit_country","Выход"),th("score","Оценка"),th("latency_ms","Задержка"),th("speed_kbps","Скорость"),th("allowed","Статус"),h("th",{},"")),
+      rows.map(n=>{ const [t,c]=nodeStatus(n); return h("tr",{},
+        h("td",{},h("div",{},n.name),h("div",{class:"muted mono"},n.server+" · "+n.type)),
+        h("td",{},(n.exit_country||"?"),h("div",{class:"muted mono"},n.exit_ip||"")),
+        h("td",{},n.score>0?n.score.toFixed(1):"0"),
+        h("td",{},n.latency_ms?Math.round(n.latency_ms)+" мс":"—"),
+        h("td",{},fmtSpeed(n.speed_kbps)),
+        h("td",{},h("span",{class:c},t)),
+        h("td",{},(n.allowed&&n.score>0&&!n.current)?h("button",{class:"b s",onclick:()=>act("/api/pin",{node:n.tag})},"Закрепить"):null)); }))));
+}
+
+function lines(v){ return v.split("\n").map(x=>x.trim()).filter(Boolean); }
+async function save(obj){ try{ SET=await api("PUT","/api/settings",obj); toast("Сохранено и применено"); render(); }catch(e){ toast(e.message,true);} }
+async function reset(key){ if(!confirm("Сбросить «"+key+"» к значению из config.yaml? Оно вернётся после перезапуска контроллера.")) return; try{ await api("DELETE","/api/settings/"+key); toast("Сброшено в базе"); load(); }catch(e){ toast(e.message,true);} }
+function help(k){ return h("div",{class:"hint"},(SET.help[k]||"")+(SET.overridden.includes(k)?" · изменено в панели":"")); }
+
+function vSettings(){
+  const V=SET.values;
+  let countries=[...V.blocked_exit_countries];
+  const chips=h("div",{});
+  const drawChips=()=>chips.replaceChildren(...countries.map(c=>h("span",{class:"chip"},c,h("button",{title:"убрать",onclick:()=>{countries=countries.filter(x=>x!==c);drawChips();}},"×"))));
+  drawChips();
+  const addI=h("input",{placeholder:"RU",maxlength:2,style:"width:80px;text-transform:uppercase"});
+  const exitCheck=h("input",{type:"checkbox",style:"width:auto",checked:V.exit_check});
+  const defAct=h("select",{},[["proxy","через балансировщик"],["block","блокировать (белый список)"]].map(([v,t])=>h("option",{value:v,selected:v===V.default_action},t)));
+  const ident=h("select",{},[["endpoint","одинаковые ссылки = один узел"],["link","каждая ссылка отдельным узлом"]].map(([v,t])=>h("option",{value:v,selected:v===V.node_identity},t)));
+  const gw=h("input",{value:V.gateway_name});
+  const margin=h("input",{type:"number",step:"0.05",min:"1",max:"3",value:V.switch_margin});
+  const confirmI=h("input",{type:"number",min:"1",max:"20",value:V.switch_confirm});
+  const probes=h("textarea",{},V.probe_urls.join("\n"));
+  const subs=h("textarea",{style:"min-height:120px"},V.subscriptions.join("\n"));
+  let rules=V.rules.map(r=>({action:r.action,match:(r.match||[]).join("\n")}));
+  const rulesBox=h("div",{});
+  const drawRules=()=>rulesBox.replaceChildren(...rules.map((r,i)=>h("div",{class:"rule"},
+    h("div",{class:"row"},
+      h("span",{class:"muted"},(i+1)+"."),
+      h("select",{style:"width:auto",onchange:e=>r.action=e.target.value},[["direct","напрямую через сервер"],["block","блокировать"],["proxy","через балансировщик"]].map(([v,t])=>h("option",{value:v,selected:v===r.action},t))),
+      h("span",{style:"flex:1"}),
+      h("button",{class:"b s",disabled:i===0,onclick:()=>{[rules[i-1],rules[i]]=[rules[i],rules[i-1]];drawRules();}},"↑"),
+      h("button",{class:"b s",disabled:i===rules.length-1,onclick:()=>{[rules[i+1],rules[i]]=[rules[i],rules[i+1]];drawRules();}},"↓"),
+      h("button",{class:"b d",onclick:()=>{rules.splice(i,1);drawRules();}},"Удалить")),
+    h("textarea",{placeholder:"по одному на строку: *.ru, 100.200.255.0/24, port:25, keyword:ads",oninput:e=>r.match=e.target.value},r.match))));
+  drawRules();
+  const sec=(title,helpKeys,body,saveFn)=>h("div",{class:"card"},h("h2",{},title),helpKeys.map(help),body,h("div",{class:"row",style:"margin-top:10px"},h("button",{class:"b",onclick:saveFn},"Сохранить"),helpKeys.some(k=>SET.overridden.includes(k))?h("button",{class:"b d",onclick:()=>helpKeys.forEach(k=>SET.overridden.includes(k)&&reset(k))},"Сбросить"):null));
+  return h("div",{},
+    sec("Страны выхода",["blocked_exit_countries","exit_check"],h("div",{},chips,
+      h("div",{class:"row"},addI,h("button",{class:"b s",onclick:()=>{const c=addI.value.trim().toUpperCase(); if(/^[A-Z]{2}$/.test(c)&&!countries.includes(c)){countries.push(c);countries.sort();drawChips();} addI.value="";}},"Добавить")),
+      h("label",{class:"row",style:"margin-top:10px"},exitCheck,"Измерять страну выхода и не пускать пользователей на узлы из запрещённых стран")),
+      ()=>save({blocked_exit_countries:countries,exit_check:exitCheck.checked})),
+    sec("Правила фильтра трафика",["rules","default_action"],h("div",{},
+      h("div",{class:"hint"},"Правила проверяются сверху вниз, срабатывает первое подошедшее. Формат записей: *.ru, example.com, 100.200.255.0/24, port:25, keyword:слово, regex:…"),
+      rulesBox,h("button",{class:"b s",onclick:()=>{rules.push({action:"direct",match:""});drawRules();}},"+ Добавить правило"),
+      h("div",{style:"margin-top:12px"},h("div",{class:"k"},"Всё остальное"),defAct)),
+      ()=>save({rules:rules.map(r=>({action:r.action,match:lines(r.match)})),default_action:defAct.value})),
+    sec("Подписки провайдеров",["subscriptions","node_identity"],h("div",{},h("div",{class:"hint"},"По одному адресу на строку. Адреса содержат секреты, не показывайте экран посторонним."),subs,h("div",{style:"margin-top:10px"},h("div",{class:"k"},"Как считать узлы"),ident)),
+      ()=>save({subscriptions:lines(subs.value),node_identity:ident.value})),
+    sec("Переключение узлов",["switch_margin","switch_confirm","probe_urls"],h("div",{},
+      h("div",{class:"row"},h("div",{},h("div",{class:"k"},"Запас (раз)"),margin),h("div",{},h("div",{class:"k"},"Циклов подряд"),confirmI)),
+      h("div",{class:"k",style:"margin-top:10px"},"Сайты для проверки узлов (по одному на строку)"),probes),
+      ()=>save({switch_margin:parseFloat(margin.value),switch_confirm:parseInt(confirmI.value,10),probe_urls:lines(probes.value)})),
+    sec("Название",["gateway_name"],gw,()=>save({gateway_name:gw.value})),
+    h("div",{class:"hint"},"Остальные параметры (интервалы проверок, ключи Reality, порты) меняются в config.yaml и требуют перезапуска."));
+}
+
+function copyBtn(text){ return h("button",{class:"b s",onclick:async()=>{ try{ await navigator.clipboard.writeText(text); toast("Скопировано"); }catch(e){ prompt("Скопируйте:",text);} }},"Копировать"); }
+function vUsers(){
+  const name=h("input",{placeholder:"имя пользователя",class:"grow",maxlength:64});
+  return h("div",{},
+    h("div",{class:"card"},h("h2",{},"Новый пользователь"),h("div",{class:"row"},name,h("button",{class:"b",onclick:async()=>{ try{ USERS=await api("POST","/api/users",{name:name.value}); toast("Пользователь создан, он появится в шлюзе в течение 2-3 минут"); render(); }catch(e){ toast(e.message,true);} }},"Создать"))),
+    h("div",{class:"card tw"},h("table",{},h("tr",{},h("th",{},"Имя"),h("th",{},"Статус"),h("th",{},"Ссылки"),h("th",{},"")),
+      USERS.map(u=>h("tr",{},
+        h("td",{},u.name),h("td",{},h("span",{class:u.enabled?"ok":"muted"},u.enabled?"включён":"отключён")),
+        h("td",{},h("div",{class:"row"},"Балансировщик",copyBtn(u.gateway)),u.subscription?h("div",{class:"row",style:"margin-top:6px"},"Подписка",copyBtn(u.subscription)):h("div",{class:"hint"},"подписка выключена (sub_listen)")),
+        h("td",{},h("button",{class:"b "+(u.enabled?"d":"s"),onclick:async()=>{ try{ USERS=await api("POST","/api/users/"+encodeURIComponent(u.name)+"/"+(u.enabled?"disable":"enable")); render(); }catch(e){ toast(e.message,true);} }},u.enabled?"Отключить":"Включить")))))));
+}
+
+function start(){ $("#login").classList.add("hidden"); $("#app").classList.remove("hidden"); load(); clearInterval(start.t); start.t=setInterval(()=>{ const a=document.activeElement; if(a&&["INPUT","TEXTAREA","SELECT"].includes(a.tagName)) return; if(TAB==="overview"||TAB==="nodes") load(); },15000); }
+if (TOKEN) { api("GET","/api/overview").then(start).catch(()=>logout(false)); } else { logout(false); }
+</script>
+</body>
+</html>
