@@ -289,6 +289,7 @@ type UserStat struct {
 	AllConns int64    `json:"all_conns"`
 	LastSeen *int64   `json:"last_seen,omitempty"` // unix seconds
 	LastIP   string   `json:"last_ip,omitempty"`
+	Kind     string   `json:"kind,omitempty"`     // "wg" for a router or device on the WireGuard tunnel
 	Errors   int64    `json:"errors"`             // errors and blocked destinations since the gateway started
 	LastErr  *int64   `json:"last_err,omitempty"` // unix seconds
 	ErrMsg   string   `json:"err_msg,omitempty"`
@@ -310,6 +311,7 @@ type StatsView struct {
 func (c *Collector) View(ctx context.Context) (*StatsView, error) {
 	var sums map[string]*TrafficSum
 	var users []User
+	var wgPeers []WGPeer
 	if c.st != nil {
 		var err error
 		if sums, err = c.st.TrafficSummary(ctx); err != nil {
@@ -318,6 +320,7 @@ func (c *Collector) View(ctx context.Context) (*StatsView, error) {
 		if users, err = c.st.ListUsers(ctx); err != nil {
 			return nil, err
 		}
+		wgPeers, _ = c.st.ListWGPeers(ctx)
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -358,6 +361,11 @@ func (c *Collector) View(ctx context.Context) (*StatsView, error) {
 		row(u.Name).Enabled = u.Enabled
 		names[u.Name] = true
 	}
+	for _, p := range wgPeers {
+		u := row(wgSocksUser(p.Name))
+		u.Enabled, u.Kind = p.Enabled, "wg"
+		names[u.Name] = true
+	}
 	for n := range sums {
 		row(n)
 	}
@@ -385,6 +393,9 @@ func (c *Collector) View(ctx context.Context) (*StatsView, error) {
 			u.Errors, u.ErrMsg = e.Count, e.Msg
 			t := e.Last
 			u.LastErr = &t
+		}
+		if strings.HasPrefix(n, "wg-") {
+			u.Kind = "wg"
 		}
 		if sp, ok := c.speed[n]; ok {
 			u.UpBps, u.DownBps = sp.Up, sp.Down

@@ -340,8 +340,8 @@ func (c *cconn) CloseWrite() error {
 // ---------------------------------------------------------------- sing-box log lines
 
 var (
-	reFrom  = regexp.MustCompile(`\[(\d+) [^\]]*\] inbound/vless\[vless-in\]: inbound connection from 127\.0\.0\.1:(\d+)`)
-	reUser  = regexp.MustCompile(`\[(\d+) [^\]]*\] inbound/vless\[vless-in\]: \[([^\]]+)\] inbound connection to `)
+	reFrom  = regexp.MustCompile(`\[(\d+) [^\]]*\] inbound/(?:vless\[vless-in\]|socks\[wg-in\]): inbound connection from 127\.0\.0\.1:(\d+)`)
+	reUser  = regexp.MustCompile(`\[(\d+) [^\]]*\] inbound/(?:vless\[vless-in\]|socks\[wg-in\]): \[([^\]]+)\] inbound connection to `)
 	reBad   = regexp.MustCompile(`inbound/vless\[vless-in\]: process connection from 127\.0\.0\.1:(\d+): .*REALITY: processed invalid connection`)
 	reLevel = regexp.MustCompile(`^(?:\S+ \S+ \S+ )?(TRACE|DEBUG|INFO)\b`)
 )

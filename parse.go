@@ -159,6 +159,14 @@ func buildTLS(q url.Values, defaultSec string) map[string]any {
 	if sni == "" {
 		sni = q.Get("peer")
 	}
+	if sni == "" && sec == "tls" {
+		// v2rayN/Xray take the Host header as the TLS server name when sni is not given (typical for CDN-fronted
+		// ws/httpupgrade nodes); without it sing-box would send the server address and get "tls: unrecognized name"
+		switch q.Get("type") {
+		case "ws", "httpupgrade", "http", "h2":
+			sni = q.Get("host")
+		}
+	}
 	if sni != "" {
 		t["server_name"] = sni
 	}

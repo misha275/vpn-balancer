@@ -23,6 +23,7 @@ services:
     stop_grace_period: 15s
     ports:
       - "443:443"
+      - "51820:51820/udp"   # WireGuard для домашнего роутера (wg_port в config.yaml)
     volumes:
       - ./config.yaml:/etc/balancer/config.yaml:ro
       - gateway-data:/var/lib/balancer

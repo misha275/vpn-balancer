@@ -59,6 +59,15 @@ func TestUIDemo(t *testing.T) {
 	outer.HandleFunc("GET /api/overview", a.auth(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"snapshot": map[string]any{"nodes": nodes}, "switches": []any{}, "ready": true})
 	}))
+	outer.HandleFunc("GET /api/wg", a.auth(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, wgView{Port: 51820, Network: "10.77.0.0/24", ServerIP: "10.77.0.1", ServerKey: "uXk3w0nQ9bJt1Zr7mC5dYh2LpA8sVfEoG4iTqNcRb1M=", Running: true,
+			Peers: []wgPeerView{{Name: "home", Address: "10.77.0.2", Subnets: []string{"192.168.50.0/24"}, Enabled: true, PublicKey: "Qk0zN2xYb3VwTGZ5c0hFcW5kQ1JhV2pTdDhNYUl1UGc=", Created: now.Unix()},
+				{Name: "cottage", Address: "10.77.0.3", Subnets: []string{"192.168.60.0/24"}, Enabled: false, PublicKey: "Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MGFiY2RlZmdoaWo=", Created: now.Unix()}}})
+	}))
+	outer.HandleFunc("GET /api/wg/peers/{name}/config", a.auth(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, "/interface wireguard add name=wg-vpn listen-port=0 mtu=1380 private-key=\"...\"\n/interface wireguard peers add ...\n")
+	}))
 	outer.HandleFunc("GET /api/users", a.auth(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, []userView{{"admin", true, "vless://x", "https://sub/x"}, {"alice", true, "vless://y", ""}})
 	}))

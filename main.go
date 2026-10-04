@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/signal"
@@ -74,6 +75,12 @@ type Config struct {
 	TelegramToken    string        `yaml:"telegram_token"`
 	TelegramChat     string        `yaml:"telegram_chat"`
 	HTTPListen       string        `yaml:"http_listen"`
+
+	// --- WireGuard for routers (see wireguard.go) ---
+	WGPort     int    `yaml:"wg_port"`     // UDP port of the tunnel (default 51820)
+	WGNetwork  string `yaml:"wg_network"`  // network inside the tunnel (default 10.77.0.0/24)
+	WGEndpoint string `yaml:"wg_endpoint"` // address the routers connect to (default public_host)
+	wgPeers    []WGPeer
 
 	// --- country policy ---
 	ExitCheck        *bool         `yaml:"exit_check"`             // measure where each node really exits (default: true)
@@ -143,6 +150,8 @@ func LoadConfig(path string) (*Config, error) {
 	defS(&c.Gateway, "embedded")
 	defS(&c.GatewayListen, "0.0.0.0:9000")
 	defI(&c.GatewayBase, 21000)
+	defI(&c.WGPort, wgDefaultPort)
+	defS(&c.WGNetwork, wgDefaultNetwork)
 	def(&c.DrainTimeout, 15*time.Minute)
 	def(&c.DrainUrgent, 5*time.Second)
 	defS(&c.SpeedURL, "https://speed.cloudflare.com/__down?bytes=5000000")
@@ -162,6 +171,9 @@ func LoadConfig(path string) (*Config, error) {
 	defS(&c.GatewayName, "Балансировщик")
 	def(&c.GeoTTL, 6*time.Hour)
 	def(&c.GeoBlockedTTL, 30*time.Minute)
+	if p, err := netip.ParsePrefix(c.WGNetwork); err != nil || !p.Addr().Is4() || p.Bits() < 16 || p.Bits() > 29 {
+		return nil, fmt.Errorf("wg_network must be an IPv4 network between /16 and /29, got %q", c.WGNetwork)
+	}
 	c.NodeIdentity = strings.ToLower(strings.TrimSpace(c.NodeIdentity))
 	if c.NodeIdentity == "" {
 		c.NodeIdentity = "endpoint"
@@ -474,6 +486,10 @@ func run(ctx context.Context, cfg *Config, st *Store) {
 	if err != nil {
 		log.Fatalf("users: %v", err)
 	}
+	wgm := NewWGManager(cfg, st, core)
+	if err := wgm.Load(ctx); err != nil {
+		log.Printf("wireguard: %v", err)
+	}
 	if last := st.LastSelected(ctx); last != "" {
 		chk.SetCurrent(last)
 	}
@@ -496,6 +512,7 @@ func run(ctx context.Context, cfg *Config, st *Store) {
 
 	go core.Run(ctx)
 	go chk.Run(ctx)
+	go wgm.Reconcile(ctx)
 
 	go func() {
 		if len(nodes) > 0 {
@@ -525,6 +542,9 @@ func run(ctx context.Context, cfg *Config, st *Store) {
 				return
 			case <-t.C:
 			}
+			if err := wgm.Load(ctx); err != nil {
+				log.Printf("reconcile: wireguard peers: %v", err)
+			}
 			ns, err1 := st.ActiveNodes(ctx, cfg.NodeGrace)
 			us, err2 := st.EnabledUsers(ctx)
 			if err1 != nil || err2 != nil {
@@ -532,6 +552,7 @@ func run(ctx context.Context, cfg *Config, st *Store) {
 				continue
 			}
 			act, applied, err := core.Apply(ns, us, chk.CurrentTag())
+			wgm.Reconcile(ctx)
 			if err != nil {
 				log.Printf("reconcile: %v", err)
 				continue

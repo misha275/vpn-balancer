@@ -230,3 +230,19 @@ func mustJSON(v any) string {
 	}
 	return string(b)
 }
+
+func TestTLSServerNameFallsBackToHost(t *testing.T) {
+	n := ParseLinks("vless://" + testUUID + "@1.2.3.4:443?security=tls&type=ws&host=cdn.example.com&path=/w#a\n" +
+		"vless://" + testUUID + "@1.2.3.5:443?security=tls&type=ws&host=cdn.example.com&sni=real.example.com&path=/w#b\n" +
+		"vless://" + testUUID + "@1.2.3.6:443?security=tls&type=tcp&host=ignored.example.com#c")
+	if len(n) != 3 {
+		t.Fatalf("parsed %d", len(n))
+	}
+	sn := func(x *Node) any {
+		tl, _ := x.Outbound["tls"].(map[string]any)
+		return tl["server_name"]
+	}
+	if sn(n[0]) != "cdn.example.com" || sn(n[1]) != "real.example.com" || sn(n[2]) != nil {
+		t.Fatalf("server names: %v %v %v", sn(n[0]), sn(n[1]), sn(n[2]))
+	}
+}

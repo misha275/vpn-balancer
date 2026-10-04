@@ -75,6 +75,8 @@ type GWState struct {
 	Clash       int        `json:"clash_port"`
 	Socks       int        `json:"socks_port"`
 	FrontUp     bool       `json:"front_up"`
+	WG          bool       `json:"wg"`    // the WireGuard endpoint runs
+	WGFp        string     `json:"wg_fp"` // which configuration of it
 	Slots       []SlotInfo `json:"slots"`
 }
 
@@ -86,6 +88,7 @@ type Gateway interface {
 	Stats(ctx context.Context) (GWStats, error)                                         // live sessions and what happened since the previous call
 	Logs(ctx context.Context, after int64, limit int) (LogPage, error)                  // console of the gateway
 	UserLogs(ctx context.Context, user string, after int64, limit int) (LogPage, error) // errors of one user
+	ApplyWG(ctx context.Context, cfg []byte, fp string) error                           // the WireGuard endpoint of the gateway (nil config = off)
 	Host() string                                                                       // address under which the controller reaches the Clash API and the probe inbound
 }
 
@@ -109,6 +112,8 @@ func derive(key, purpose string) string {
 type engSlot struct {
 	idx                   int
 	inbound, clash, socks int
+	wgIn                  int
+	ready                 int // the port that tells the instance serves (set by patchConfig)
 	cmd                   *exec.Cmd
 	exited                chan struct{}
 	stopping              bool
@@ -136,6 +141,8 @@ type Engine struct {
 	gen     atomic.Int64
 	frontUp atomic.Bool
 	stopped atomic.Bool
+	wg      wgProc
+	wgFront int
 	tr      *tracker
 	logs    *LogRing
 	done    chan struct{}
@@ -149,10 +156,10 @@ func NewEngine(cfg *Config, bind string, recoverLast bool) *Engine {
 		drain: cfg.DrainTimeout, urgentGrace: cfg.DrainUrgent, recoverLast: recoverLast,
 		active: -1, started: time.Now(), done: make(chan struct{}),
 		http: &http.Client{Timeout: 5 * time.Second},
-		tr:   newTracker(), logs: NewLogRing(3000),
+		tr:   newTracker(), logs: NewLogRing(3000), wgFront: cfg.wgFrontPort(),
 	}
 	for i := range e.slots {
-		e.slots[i] = &engSlot{idx: i, inbound: e.base + 10*i + 1, clash: e.base + 10*i + 2, socks: e.base + 10*i + 3}
+		e.slots[i] = &engSlot{idx: i, inbound: e.base + 10*i + 1, clash: e.base + 10*i + 2, socks: e.base + 10*i + 3, wgIn: e.base + 10*i + 4}
 	}
 	return e
 }
@@ -166,6 +173,7 @@ func (e *Engine) patchConfig(raw []byte, s *engSlot) ([]byte, bool, error) {
 		return nil, false, fmt.Errorf("config is not JSON: %w", err)
 	}
 	hasUsers := false
+	s.ready = 0
 	ins, _ := conf["inbounds"].([]any)
 	for _, in := range ins {
 		m, ok := in.(map[string]any)
@@ -175,9 +183,16 @@ func (e *Engine) patchConfig(raw []byte, s *engSlot) ([]byte, bool, error) {
 		switch m["tag"] {
 		case "vless-in":
 			hasUsers = true
+			s.ready = s.inbound
 			m["listen"], m["listen_port"] = "127.0.0.1", s.inbound // only the front may reach it
 		case "probe-in":
 			m["listen"], m["listen_port"] = e.bind, s.socks
+		case "wg-in":
+			hasUsers = true
+			if s.ready == 0 {
+				s.ready = s.wgIn
+			}
+			m["listen"], m["listen_port"] = "127.0.0.1", s.wgIn // only the front may reach it
 		}
 	}
 	// the "info" level is what tells which user a connection belongs to (see stats_gw.go); the lines themselves are not kept
@@ -250,7 +265,7 @@ func (e *Engine) startSlot(s *engSlot, cfg []byte, hasUsers bool) error {
 				if !hasUsers {
 					return nil
 				}
-				if c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", s.inbound), time.Second); err == nil {
+				if c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", s.ready), time.Second); err == nil {
 					c.Close()
 					return nil
 				}
@@ -462,6 +477,7 @@ func (e *Engine) State(ctx context.Context) (GWState, error) {
 	defer e.mu.Unlock()
 	st := GWState{API: gatewayAPIVersion, Active: e.active, Fingerprint: e.fp, Meta: e.meta,
 		Gen: e.gen.Load(), Started: e.started, AppliedAt: e.applied, FrontUp: e.frontUp.Load()}
+	st.WG, st.WGFp = e.wgState()
 	if e.active >= 0 {
 		st.Clash, st.Socks = e.slots[e.active].clash, e.slots[e.active].socks
 	}
@@ -503,7 +519,9 @@ func (e *Engine) Run(ctx context.Context) {
 	go e.tr.reportLoop(ctx.Done())
 	if e.recoverLast {
 		go e.recover()
+		go e.recoverWG()
 	}
+	go e.serveWGFront(ctx)
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", e.publicPort))
 	if err != nil {
 		log.Printf("gateway: cannot listen on :%d: %v", e.publicPort, err)
@@ -554,6 +572,7 @@ func (e *Engine) recover() {
 
 func (e *Engine) Shutdown() {
 	e.stopped.Store(true)
+	e.stopWG()
 	for _, s := range e.slots {
 		e.mu.Lock()
 		run := s.cmd != nil
@@ -565,6 +584,10 @@ func (e *Engine) Shutdown() {
 }
 
 func (e *Engine) handle(c net.Conn) {
+	e.handleTo(c, func(s *engSlot) int { return s.inbound }, false)
+}
+
+func (e *Engine) handleTo(c net.Conn, portOf func(*engSlot) int, viaWG bool) {
 	e.mu.Lock()
 	var s *engSlot
 	if e.active >= 0 {
@@ -575,7 +598,7 @@ func (e *Engine) handle(c net.Conn) {
 		c.Close()
 		return
 	}
-	d, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", s.inbound), 3*time.Second)
+	d, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", portOf(s)), 3*time.Second)
 	if err != nil {
 		c.Close()
 		return
@@ -586,7 +609,11 @@ func (e *Engine) handle(c net.Conn) {
 	if la, ok := d.LocalAddr().(*net.TCPAddr); ok {
 		port = la.Port
 	}
-	sess := e.tr.open(s.idx, port, c.RemoteAddr())
+	var from net.Addr = c.RemoteAddr()
+	if viaWG {
+		from = wgAddr{}
+	}
+	sess := e.tr.open(s.idx, port, from)
 	defer e.tr.end(sess)
 	pipe(&cconn{Conn: c, s: sess, t: e.tr}, d)
 }
@@ -669,6 +696,7 @@ func RunGateway(ctx context.Context, cfg *Config) {
 		pg, _ := e.Logs(r.Context(), after, limit)
 		writeJSON(w, 200, pg)
 	}))
+	e.registerWG(mux, auth)
 	mux.HandleFunc("POST /v1/closeall", auth(func(w http.ResponseWriter, r *http.Request) {
 		_ = e.CloseAll(r.Context())
 		writeJSON(w, 200, map[string]string{"ok": "closed"})
@@ -800,3 +828,9 @@ func (g *remoteGateway) Logs(ctx context.Context, after int64, limit int) (LogPa
 	var pg LogPage
 	return pg, json.Unmarshal(data, &pg)
 }
+
+// wgAddr marks sessions that come through the WireGuard tunnel.
+type wgAddr struct{}
+
+func (wgAddr) Network() string { return "wireguard" }
+func (wgAddr) String() string  { return "WireGuard" }

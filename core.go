@@ -83,6 +83,15 @@ func (c *Core) GatewayState() (GWState, error) {
 	return c.gw.State(ctx)
 }
 
+// ApplyWG gives the gateway the config of the WireGuard endpoint (nil = switch it off).
+func (c *Core) ApplyWG(ctx context.Context, cfg []byte, fp string) error {
+	err := c.gw.ApplyWG(ctx, cfg, fp)
+	if err != nil && strings.Contains(err.Error(), "http 404") {
+		err = errors.New("the gateway is an older version without WireGuard: bash install.sh update --gateway")
+	}
+	return err
+}
+
 // GatewayStats returns live sessions and the traffic counted since the previous call.
 func (c *Core) GatewayStats(ctx context.Context) (GWStats, error) {
 	st, err := c.gw.Stats(ctx)
@@ -237,7 +246,7 @@ func tightens(oldRules, newRules []RuleCfg, oldDef, newDef string) bool {
 // the new config next to the old one (see gateway.go). They are cut early (urgent) only when the change
 // withdraws something: a user, the node they are using, or a new block rule.
 func (c *Core) Apply(nodes []*Node, users []User, def string) (active []*Node, applied bool, err error) {
-	fp := fingerprint(nodes, users) + "|" + c.policySig(nodes)
+	fp := fingerprint(nodes, users) + "|" + c.policySig(nodes) + "|wg:" + c.cfg.wgSig()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if fp == c.applied {
@@ -246,7 +255,8 @@ func (c *Core) Apply(nodes []*Node, users []User, def string) (active []*Node, a
 	// The pause between switches keeps the CPU calm (every switch starts a sing-box with all nodes). It does
 	// not apply while no node may carry traffic: users are rejected anyway, so the first allowed node
 	// (for example right after the exit country was measured) goes live at once.
-	if c.applied != "" && c.hadProxy && time.Since(c.lastReload) < c.cfg.MinReload {
+	wgChanged := c.applied != "" && !strings.HasSuffix(c.applied, "|wg:"+c.cfg.wgSig()) // a new router must not wait for the pause
+	if c.applied != "" && c.hadProxy && !wgChanged && time.Since(c.lastReload) < c.cfg.MinReload {
 		return c.active, false, nil // retried on the next reconcile tick
 	}
 	// A restarted controller finds the gateway running the very same config: nothing to switch.
@@ -525,14 +535,24 @@ func BuildConfig(cfg *Config, nodes []*Node, users []User, def string) ([]byte, 
 	if err != nil {
 		return nil, err
 	}
-	rules := append(probeRules, userRules...)
+	wgPeers := activeWGPeers(cfg.getWGPeers())
+	rules := probeRules
+	if len(wgPeers) > 0 {
+		// flows from the home network arrive as plain IP connections; reading the site name from them (TLS/HTTP) lets domain rules apply
+		rules = append(rules, map[string]any{"inbound": []string{"wg-in"}, "action": "sniff"})
+	}
+	rules = append(rules, userRules...)
 	final := "direct" // only reachable by inbounds we do not create; user traffic never ends here
 	if !hasProxy || defaultAction == "block" {
 		// No node may carry user traffic (none yet, all dead, or all exit in censored
 		// countries) or the operator asked for a whitelist: reject everything that no
 		// rule above allowed. It must never leave through this server by itself.
 		// "block" outbound is deprecated since sing-box 1.11 (removed in 1.13): use a rule action.
-		rules = append(rules, map[string]any{"inbound": []string{"vless-in"}, "action": "reject"})
+		rejectIn := []string{"vless-in"}
+		if len(wgPeers) > 0 {
+			rejectIn = append(rejectIn, "wg-in")
+		}
+		rules = append(rules, map[string]any{"inbound": rejectIn, "action": "reject"})
 	}
 	if hasProxy {
 		d := tags[0]
@@ -567,6 +587,15 @@ func BuildConfig(cfg *Config, nodes []*Node, users []User, def string) ([]byte, 
 					"short_id":    []string{cfg.Reality.ShortID},
 				},
 			},
+		})
+	}
+	if len(wgPeers) > 0 {
+		var wu []any
+		for _, p := range wgPeers {
+			wu = append(wu, map[string]any{"username": wgSocksUser(p.Name), "password": cfg.wgSocksPassword()})
+		}
+		inbounds = append(inbounds, map[string]any{
+			"type": "socks", "tag": "wg-in", "listen": "127.0.0.1", "listen_port": cfg.GatewayBase + 9, "users": wu,
 		})
 	}
 	if len(probeUsers) > 0 {

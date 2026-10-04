@@ -112,7 +112,7 @@ $("#logout").onclick=()=>logout(false);
 $("#tokgo").onclick=async()=>{ TOKEN=$("#tok").value.trim(); try{ await api("GET","/api/overview"); sessionStorage.setItem("tok",TOKEN); start(); }catch(e){ $("#tokerr").textContent=e.message; } };
 $("#tok").addEventListener("keydown",e=>{ if(e.key==="Enter") $("#tokgo").click(); });
 
-const TABS=[["overview","Обзор"],["server","Сервер"],["clients","Клиенты"],["nodes","Узлы"],["settings","Настройки"],["users","Пользователи"],["console","Консоль"]];
+const TABS=[["overview","Обзор"],["server","Сервер"],["clients","Клиенты"],["nodes","Узлы"],["settings","Настройки"],["users","Пользователи"],["wg","WireGuard"],["console","Консоль"]];
 function renderNav(){ const n=$("#nav"); n.replaceChildren(...TABS.map(([id,t])=>h("button",{class:id===TAB?"on":"",onclick:()=>{TAB=id;load();}},t))); }
 
 async function load(){
@@ -121,6 +121,7 @@ async function load(){
     if (TAB==="overview"||TAB==="nodes"){ DATA=await api("GET","/api/overview"); }
     if (TAB==="settings"){ SET=await api("GET","/api/settings"); }
     if (TAB==="users"){ USERS=await api("GET","/api/users"); }
+    if (TAB==="wg"){ WG=await api("GET","/api/wg"); }
     if (TAB==="server"){ [STAT,HIST]=await Promise.all([api("GET","/api/stats"),api("GET","/api/stats/history?range="+RANGE)]); }
     if (TAB==="clients"){ STAT=await api("GET","/api/stats"); }
     if (!DATA) DATA=await api("GET","/api/overview");
@@ -130,7 +131,7 @@ async function load(){
   st.className="pill "+(!DATA.ready||s.net_down?"bad":"ok");
   render();
 }
-function render(){ const m=$("#main"); m.replaceChildren(({overview:vOverview,server:vServer,clients:vClients,nodes:vNodes,settings:vSettings,users:vUsers,console:vConsole})[TAB]()); }
+function render(){ const m=$("#main"); m.replaceChildren(({overview:vOverview,server:vServer,clients:vClients,nodes:vNodes,settings:vSettings,users:vUsers,wg:vWG,console:vConsole})[TAB]()); }
 
 function fmtSpeed(k){ return k>0? (k>=1000? (k/1000).toFixed(0)+" Мбит/с": k+" кбит/с") : "—"; }
 function nodeStatus(n){
@@ -284,6 +285,50 @@ function vSettings(){
     h("div",{class:"hint"},"Остальные параметры (интервалы проверок, ключи Reality, порты) меняются в config.yaml и требуют перезапуска."));
 }
 
+let WG=null, WGTEXT=null;
+async function wgText(name, format, endpoint){
+  try{
+    const r=await fetch("/api/wg/peers/"+encodeURIComponent(name)+"/config?format="+format+(endpoint?"&endpoint="+encodeURIComponent(endpoint):""),{headers:{Authorization:"Bearer "+TOKEN}});
+    const t=await r.text(); if(!r.ok){ let e=t; try{e=JSON.parse(t).error}catch(_){} throw new Error(e); }
+    WGTEXT={name,format,endpoint:endpoint||WG.endpoint,text:t}; render();
+  }catch(e){ toast(e.message,true); }
+}
+function vWG(){
+  if(!WG) return h("div",{class:"hint"},"загрузка…");
+  const name=h("input",{placeholder:"имя, например home",class:"grow",maxlength:32});
+  const subs=h("input",{placeholder:"192.168.50.0/24",value:"192.168.50.0/24",class:"grow"});
+  const add=async()=>{ try{ WG=await api("POST","/api/wg/peers",{name:name.value,subnets:subs.value.split(/[,\s]+/).filter(Boolean)}); toast("Пара создана. Туннель поднимется на сервере в течение 30 секунд"); wgText(name.value.trim(),"routeros"); }catch(e){ toast(e.message,true);} };
+  const op=async(n,o)=>{ try{ WG=await api("POST","/api/wg/peers/"+encodeURIComponent(n)+"/"+o); render(); }catch(e){ toast(e.message,true);} };
+  const del=async n=>{ if(!confirm("Удалить пару «"+n+"»? Туннель этого роутера перестанет работать.")) return; try{ WG=await api("DELETE","/api/wg/peers/"+encodeURIComponent(n)); if(WGTEXT&&WGTEXT.name===n) WGTEXT=null; render(); }catch(e){ toast(e.message,true);} };
+  let box=null;
+  if(WGTEXT){
+    const ep=h("input",{value:WGTEXT.endpoint,style:"width:260px"});
+    box=h("div",{class:"card"},h("h2",{},(WGTEXT.format==="wgquick"?"Профиль WireGuard":"Скрипт для MikroTik")+": "+WGTEXT.name),
+      h("div",{class:"hint"},WGTEXT.format==="wgquick"?"Импортируйте в приложение WireGuard (телефон, ноутбук): весь трафик устройства пойдёт через балансировщик.":"RouterOS 7: откройте New Terminal на роутере и вставьте. В файле есть закрытый ключ роутера, не показывайте его посторонним."),
+      h("div",{class:"row",style:"margin:8px 0"},h("span",{class:"muted"},"Адрес сервера для роутера:"),ep,h("button",{class:"b s",onclick:()=>wgText(WGTEXT.name,WGTEXT.format,ep.value.trim())},"Применить"),
+        h("span",{class:"hint"},"из дома это адрес сервера в вашей сети (например 192.168.0.10), снаружи - внешний IP или имя")),
+      h("textarea",{readonly:true,style:"min-height:320px;font-family:monospace;font-size:12px;white-space:pre"},WGTEXT.text),
+      h("div",{class:"row",style:"margin-top:8px"},copyBtn(WGTEXT.text),h("button",{class:"b s",onclick:()=>{WGTEXT=null;render();}},"Закрыть")));
+  }
+  return h("div",{},
+    h("div",{class:"card"},h("h2",{},"WireGuard: домашняя сеть через балансировщик"),
+      h("div",{class:"hint"},"Роутер (MikroTik и любой с WireGuard) соединяется с сервером одним туннелем. Всё, что отдельная подсеть за роутером отправляет в туннель, выходит через пул узлов с теми же фильтром, выбором узла и страновой политикой, что и у приложений. Устройствам ничего настраивать не нужно: в сеть с VPN их переключают на роутере (другой порт или Wi-Fi, или адресный список)."),
+      h("div",{class:"grid"},card("Порт на сервере",WG.port+"/udp"),card("Адрес сервера в туннеле",WG.server_address),card("Сеть туннеля",WG.network),card("Туннель",WG.running?"работает":(WG.peers.some(p=>p.enabled)?"поднимается":"нет пар"),WG.running?"ok":"")),
+      h("div",{class:"hint",style:"margin-top:8px"},"Публичный ключ сервера: ",h("span",{class:"mono"},WG.server_public_key),"  ",copyBtn(WG.server_public_key)),
+      h("div",{class:"hint"},"Проверьте, что UDP-порт "+WG.port+" открыт на сервере (ufw allow "+WG.port+"/udp) и проброшен на роутере, если подключаетесь снаружи.")),
+    h("div",{class:"card"},h("h2",{},"Новая пара"),
+      h("div",{class:"row"},name,subs,h("button",{class:"b",onclick:add},"Создать")),
+      h("div",{class:"hint"},"Имя: роутер или устройство. Подсеть: сеть за роутером, которая пойдёт в VPN (например 192.168.50.0/24). Для одного устройства (телефон, ноутбук) оставьте подсеть пустой и возьмите профиль WireGuard.")),
+    box,
+    h("div",{class:"card tw"},h("table",{},h("tr",{},["Имя","Адрес в туннеле","Подсети","Статус",""].map(t=>h("th",{},t))),
+      WG.peers.map(p=>h("tr",{},h("td",{},p.name),h("td",{class:"mono"},p.address),h("td",{class:"mono"},p.subnets.length?p.subnets.join(", "):"одно устройство"),
+        h("td",{},h("span",{class:p.enabled?"ok":"muted"},p.enabled?"включена":"отключена")),
+        h("td",{},h("div",{class:"row"},
+          h("button",{class:"b s",onclick:()=>wgText(p.name,"routeros")},"Скрипт MikroTik"),h("button",{class:"b s",onclick:()=>wgText(p.name,"wgquick")},"Профиль WireGuard"),
+          h("button",{class:"b "+(p.enabled?"d":"s"),onclick:()=>op(p.name,p.enabled?"disable":"enable")},p.enabled?"Отключить":"Включить"),h("button",{class:"b d",onclick:()=>del(p.name)},"Удалить")))))),
+      WG.peers.length?null:h("div",{class:"hint",style:"padding:10px"},"Пар пока нет.")));
+}
+
 function copyBtn(text){ return h("button",{class:"b s",onclick:async()=>{ try{ await navigator.clipboard.writeText(text); toast("Скопировано"); }catch(e){ prompt("Скопируйте:",text);} }},"Копировать"); }
 function vUsers(){
   const name=h("input",{placeholder:"имя пользователя",class:"grow",maxlength:64});
@@ -368,7 +413,7 @@ function vClients(){
   const sum=k=>U.reduce((a,u)=>a+(u[k]||0),0);
   const tr=(u,named)=>h("tr",{},
     h("td",{},userBadge(u)),
-    h("td",{},h("div",{},named?u.name:(u.label||u.name)),u.enabled===false&&named?h("div",{class:"muted"},u.removed?"удалён":"отключён"):null),
+    h("td",{},h("div",{},named?u.name:(u.label||u.name),u.kind==="wg"?h("span",{class:"chip",style:"margin:0 0 0 6px;padding:1px 7px;font-size:11px"},"WireGuard"):null),u.enabled===false&&named?h("div",{class:"muted"},u.removed?"удалён":"отключён"):null),
     h("td",{},u.online||u.up_bps||u.down_bps?h("div",{},"↓ "+fmtBits(u.down_bps),h("br"),"↑ "+fmtBits(u.up_bps)):h("span",{class:"muted"},"—")),
     h("td",{},u.conns||"—"),
     h("td",{class:"mono"},u.ips&&u.ips.length?u.ips.join(", "):(u.last_ip||"—")),

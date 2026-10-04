@@ -84,3 +84,19 @@ ALTER TABLE nodes ADD COLUMN IF NOT EXISTS speed_try_at TIMESTAMPTZ NOT NULL DEF
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS speed_err TEXT NOT NULL DEFAULT '';
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS check_at TIMESTAMPTZ NOT NULL DEFAULT 'epoch';
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS svc JSONB NOT NULL DEFAULT '{}';
+
+-- WireGuard: the balancer's own key pair and the peers (routers, devices) that connect to it
+CREATE TABLE IF NOT EXISTS wg_server (
+    id          INT PRIMARY KEY,
+    private_key TEXT NOT NULL,
+    public_key  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS wg_peers (
+    name        TEXT PRIMARY KEY,
+    private_key TEXT NOT NULL,
+    public_key  TEXT NOT NULL,
+    address     TEXT NOT NULL,
+    subnets     JSONB NOT NULL DEFAULT '[]',
+    enabled     BOOLEAN NOT NULL DEFAULT true,
+    created     TIMESTAMPTZ NOT NULL DEFAULT now()
+);

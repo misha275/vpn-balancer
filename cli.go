@@ -29,6 +29,12 @@ const cliHelp = `Команды (внутри контейнера: docker compo
                               последние строки консоли контроллера (по умолчанию) или шлюза (sing-box), 100 строк
   logs user ИМЯ               ошибки и заблокированные адреса одного пользователя (диагностика)
 
+WireGuard (роутер MikroTik и другие устройства подключаются к балансировщику туннелем)
+  wg list                     сервер и пары
+  wg add ИМЯ [СЕТЬ…]          новая пара (СЕТЬ - подсеть за роутером, например 192.168.50.0/24)
+  wg show ИМЯ                 скрипт для MikroTik (--wgquick: профиль для приложения WireGuard)
+  wg on|off|del ИМЯ           включить, отключить, удалить
+
 Управление
   switch ИМЯ                  закрепить узел вручную (пока он жив и допущен)
   unpin                       снять закрепление, вернуть автоматический выбор
@@ -195,6 +201,8 @@ func runCLI(ctx context.Context, cfg *Config, st *Store, cmd string, args []stri
 		return true, cliStats(ctx, cfg, st)
 	case "logs":
 		return true, cliLogs(ctx, cfg, st, args)
+	case "wg":
+		return true, cliWG(ctx, cfg, st, args)
 	case "token":
 		tok, err := st.AdminToken(ctx)
 		if err != nil {
