@@ -162,6 +162,7 @@ func fingerprint(nodes []*Node, users []User) string {
 	}
 	sort.Strings(us)
 	h.Write([]byte(strings.Join(us, ";")))
+	h.Write([]byte("|" + viaSig(users)))
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -246,7 +247,7 @@ func tightens(oldRules, newRules []RuleCfg, oldDef, newDef string) bool {
 // the new config next to the old one (see gateway.go). They are cut early (urgent) only when the change
 // withdraws something: a user, the node they are using, or a new block rule.
 func (c *Core) Apply(nodes []*Node, users []User, def string) (active []*Node, applied bool, err error) {
-	fp := fingerprint(nodes, users) + "|" + c.policySig(nodes) + "|wg:" + c.cfg.wgSig() + "|modes:1|front:" + cfg0front(c.cfg)
+	fp := fingerprint(nodes, users) + "|" + c.policySig(nodes) + "|wg:" + c.cfg.wgSig() + "|modes:1|front:" + cfg0front(c.cfg) + "|ext:" + c.cfg.extSig()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if fp == c.applied {
@@ -300,7 +301,11 @@ func (c *Core) Apply(nodes []*Node, users []User, def string) (active []*Node, a
 		return nil
 	}
 	active = nodes
-	if err := write(active); err != nil {
+	err = write(active)
+	if err != nil && c.dropBadExt() { // one broken link of an external server must not stop the others
+		err = write(active)
+	}
+	if err != nil {
 		if len(nodes) == 0 {
 			return c.active, false, err
 		}
@@ -534,6 +539,12 @@ func BuildConfig(cfg *Config, nodes []*Node, users []User, def string) ([]byte, 
 		probeRules = append(probeRules, map[string]any{"auth_user": []string{"probe-" + n.Tag()}, "outbound": n.Tag()})
 		probeUsers = append(probeUsers, map[string]any{"username": "probe-" + n.Tag(), "password": cfg.TestSecret})
 	}
+	// external servers in the "via" mode: not in the selectors, not probed; only the users who were given them reach them
+	extByID := map[int64]ExtNode{}
+	for _, e := range cfg.getExtVia() {
+		extByID[e.ID] = e
+		outbounds = append(outbounds, e.Outbound)
+	}
 	hasProxy := len(tags) > 0
 	defaultAction := cfg.getDefaultAction()
 	userRules, err := CompileRules(cfg.getRules(), hasProxy)
@@ -546,8 +557,32 @@ func BuildConfig(cfg *Config, nodes []*Node, users []User, def string) ([]byte, 
 		// flows from the home network arrive as plain IP connections; reading the site name from them (TLS/HTTP) lets domain rules apply
 		rules = append(rules, map[string]any{"inbound": []string{"wg-in"}, "action": "sniff"})
 	}
+	// the users of an external server get their own copy of the rules with that server as the "proxy"
+	extUsers := map[int64][]string{}
+	for _, u := range users {
+		for _, id := range u.Via {
+			if _, ok := extByID[id]; ok {
+				extUsers[id] = append(extUsers[id], modeUser(u.Name, extMode(id)))
+			}
+		}
+	}
+	extIDs := make([]int64, 0, len(extUsers))
+	for id := range extUsers {
+		extIDs = append(extIDs, id)
+	}
+	sort.Slice(extIDs, func(i, j int) bool { return extIDs[i] < extIDs[j] })
+	for _, id := range extIDs {
+		mr, err := compileRules(cfg.getRules(), true, extTag(id), extUsers[id])
+		if err != nil {
+			return nil, err
+		}
+		rules = append(rules, mr...)
+		if defaultAction != "block" {
+			rules = append(rules, map[string]any{"inbound": []string{"vless-in"}, "auth_user": extUsers[id], "outbound": extTag(id)})
+		}
+	}
 	// the extra balancer modes get their own copy of the rules (first match wins, so they go before the common ones)
-	if len(users) > 0 && hasProxy {
+	if len(modeUsers(users, modeSpeed)) > 0 && hasProxy {
 		for _, m := range balModes {
 			mr, err := compileRules(cfg.getRules(), hasProxy, modeTag(m), modeUsers(users, m))
 			if err != nil {
@@ -590,7 +625,7 @@ func BuildConfig(cfg *Config, nodes []*Node, users []User, def string) ([]byte, 
 		}
 		if defaultAction != "block" {
 			final = "proxy"
-			if len(users) > 0 {
+			if len(modeUsers(users, modeSpeed)) > 0 {
 				for _, m := range balModes {
 					rules = append(rules, map[string]any{"inbound": []string{"vless-in"}, "auth_user": modeUsers(users, m), "outbound": modeTag(m)})
 				}
@@ -604,8 +639,15 @@ func BuildConfig(cfg *Config, nodes []*Node, users []User, def string) ([]byte, 
 	if len(users) > 0 {
 		var vu []any
 		for _, u := range users {
-			for _, m := range allModes {
-				vu = append(vu, map[string]any{"name": modeUser(u.Name, m), "uuid": modeUUID(u.UUID, m), "flow": "xtls-rprx-vision"})
+			if !u.NoBalancer {
+				for _, m := range allModes {
+					vu = append(vu, map[string]any{"name": modeUser(u.Name, m), "uuid": modeUUID(u.UUID, m), "flow": "xtls-rprx-vision"})
+				}
+			}
+			for _, id := range u.Via {
+				if _, ok := extByID[id]; ok {
+					vu = append(vu, map[string]any{"name": modeUser(u.Name, extMode(id)), "uuid": modeUUID(u.UUID, extMode(id)), "flow": "xtls-rprx-vision"})
+				}
 			}
 		}
 		inbounds = append(inbounds, map[string]any{
@@ -652,4 +694,35 @@ func BuildConfig(cfg *Config, nodes []*Node, users []User, def string) ([]byte, 
 func cfg0front(cfg *Config) string {
 	sni, host, port := cfg.realityFront()
 	return fmt.Sprintf("%s>%s:%d", sni, host, port)
+}
+
+// dropBadExt checks every external server in the "via" mode on its own and removes the ones
+// sing-box rejects, so a broken link of one server does not stop the others.
+// It returns true when something was removed.
+func (c *Core) dropBadExt() bool {
+	all := c.cfg.getExtVia()
+	var good []ExtNode
+	for _, e := range all {
+		d, err := json.Marshal(map[string]any{
+			"log":       map[string]any{"level": "error"},
+			"outbounds": []any{e.Outbound, map[string]any{"type": "direct", "tag": "direct"}},
+		})
+		if err == nil {
+			tmp := filepath.Join(c.cfg.WorkDir, fmt.Sprintf("ext-check-%d.json", e.ID))
+			if err = os.WriteFile(tmp, d, 0o600); err == nil {
+				err = c.check(tmp)
+				_ = os.Remove(tmp)
+			}
+		}
+		if err != nil {
+			log.Printf("core: external server %d rejected by sing-box check, excluded: %v", e.ID, err)
+			continue
+		}
+		good = append(good, e)
+	}
+	if len(good) == len(all) {
+		return false
+	}
+	c.cfg.setExtVia(good)
+	return true
 }

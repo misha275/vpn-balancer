@@ -227,6 +227,7 @@ type planView struct {
 	Name  string
 	Days  int
 	Price string
+	Has   []string // what the plan includes (names of the subscriptions)
 }
 type linkItem struct{ Kind, Title, URL string }
 type payItem struct{ Date, Plan, Amount, Status, Class string }
@@ -261,9 +262,32 @@ func (s *Site) planViews(ctx context.Context) []planView {
 	if err != nil {
 		return nil
 	}
+	names := map[string]string{}
+	if bs, err := s.st.ListBundles(ctx, true); err == nil {
+		for _, b := range bs {
+			names[bundlePrefix+b.Slug] = b.Name
+		}
+	}
 	out := make([]planView, 0, len(ps))
 	for _, p := range ps {
-		out = append(out, planView{p.ID, p.Name, p.Days, fmtMoney(p.PriceCents, p.Currency)})
+		keys := p.Subs
+		if keys == nil {
+			keys = s.cfg.defaultSubs()
+		}
+		var has []string
+		for _, k := range keys {
+			switch {
+			case k == subBalancers:
+				has = append(has, "балансировщики")
+			case k == subAll:
+				has = append(has, "балансировщики и все серверы")
+			default:
+				if n, ok := names[k]; ok {
+					has = append(has, n)
+				}
+			}
+		}
+		out = append(out, planView{p.ID, p.Name, p.Days, fmtMoney(p.PriceCents, p.Currency), has})
 	}
 	return out
 }
@@ -491,20 +515,40 @@ func (s *Site) linkBase(r *http.Request) string {
 	return scheme + "://" + r.Host
 }
 
-// accountLinks are the links of the cabinet: the subscriptions and the three balancers.
+// accountLinks are the links of the cabinet: the subscriptions the account may take (and, with the balancer among them, its three
+// balancer links). Own nodes never appear as links: they are only inside the bundle subscriptions.
 func (s *Site) accountLinks(r *http.Request, a *Account) []linkItem {
 	base := s.linkBase(r)
 	u := a.User()
-	out := []linkItem{
-		{"sub-balancers", "Подписка: только балансировщики", base + "/sub/" + a.SubToken + "/balancers"},
-		{"sub-all", "Подписка: балансировщики и все серверы", base + "/sub/" + a.SubToken},
-	}
-	for _, m := range allModes {
-		k := m
-		if k == "" {
-			k = "current"
+	keys, _ := effectiveSubs(s.cfg, u)
+	names := map[string]string{}
+	ix, ixErr := s.st.LoadSubIndex(r.Context())
+	if ixErr == nil {
+		for k, b := range ix.Bundles {
+			names[k] = b.Name
 		}
-		out = append(out, linkItem{k, "Балансировщик: " + modeTitle(m), modeLink(s.cfg, u, m)})
+	}
+	out := []linkItem{}
+	for _, k := range keys {
+		switch {
+		case k == subBalancers:
+			out = append(out, linkItem{"sub-balancers", "Подписка: только балансировщики", base + "/sub/" + a.SubToken + "/balancers"})
+		case k == subAll:
+			out = append(out, linkItem{"sub-all", "Подписка: балансировщики и все серверы", base + "/sub/" + a.SubToken + "/all"})
+		default:
+			if n, ok := names[k]; ok { // a deleted or switched-off bundle is not offered
+				out = append(out, linkItem{"sub-b-" + k[len(bundlePrefix):], "Подписка: " + n, base + "/sub/" + a.SubToken + "/b/" + k[len(bundlePrefix):]})
+			}
+		}
+	}
+	if main := ixErr == nil && func() bool { m, _ := ix.access(s.cfg, u); return m }(); main {
+		for _, m := range allModes {
+			k := m
+			if k == "" {
+				k = "current"
+			}
+			out = append(out, linkItem{k, "Балансировщик: " + modeTitle(m), modeLink(s.cfg, u, m)})
+		}
 	}
 	return out
 }

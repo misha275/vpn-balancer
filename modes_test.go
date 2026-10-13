@@ -405,6 +405,7 @@ func modesSubCfg() *Config {
 	cfg.PublicHost, cfg.InboundPort, cfg.GatewayName = "gw.example.com", 443, "Balancer"
 	cfg.Reality.PublicKey, cfg.Reality.ShortID, cfg.Reality.HandshakeServer = "PUB", "ab12", "www.apple.com"
 	cfg.SubPublicURL = "https://sub.example.com"
+	cfg.UserDefaultSubs = []string{subBalancers, subAll}
 	return cfg
 }
 
@@ -417,7 +418,7 @@ func TestUserViewHasModesAndSubscriptions(t *testing.T) {
 	if v.Gateway != v.Modes[0].Link {
 		t.Error("the main link stays the first one")
 	}
-	if len(v.Subs) != 2 || v.Subs[0].Link != "https://sub.example.com/sub/tok/balancers" || v.Subs[1].Link != "https://sub.example.com/sub/tok" || v.Subscription != v.Subs[1].Link {
+	if len(v.Subs) != 2 || v.Subs[0].Link != "https://sub.example.com/sub/tok/balancers" || v.Subs[1].Link != "https://sub.example.com/sub/tok/all" || v.Subscription != "https://sub.example.com/sub/tok" {
 		t.Fatalf("subscriptions: %+v (%s)", v.Subs, v.Subscription)
 	}
 	cfg.SubPublicURL = ""

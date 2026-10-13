@@ -405,8 +405,12 @@ func runCLI(ctx context.Context, cfg *Config, st *Store, cmd string, args []stri
 		for _, u := range us {
 			if u.Name == args[0] {
 				if s := subURL(cfg, u.SubToken); s != "" {
-					fmt.Println(s) // balancers + all servers
-					fmt.Println(subURLKind(cfg, u.SubToken, "balancers"))
+					fmt.Println(s + "   (всё, что доступно пользователю)")
+					keys, src := effectiveSubs(cfg, u)
+					for _, k := range keys {
+						fmt.Printf("%s   [%s]\n", subURLKind(cfg, u.SubToken, k), k)
+					}
+					fmt.Printf("доступные подписки заданы: %s\n", map[string]string{"user": "для пользователя", "plan": "тарифом", "default": "по умолчанию"}[src])
 					return true, nil
 				}
 				return true, fmt.Errorf("подписки выключены: задайте sub_listen и sub_public_url в config.yaml")

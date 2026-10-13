@@ -104,6 +104,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/users", a.auth(a.users))
 	mux.HandleFunc("GET /api/qr", a.auth(a.qr))
 	a.registerSite(mux)
+	a.registerSubs(mux)
 	mux.HandleFunc("POST /api/users", a.auth(a.addUser))
 	mux.HandleFunc("POST /api/users/{name}/{op}", a.auth(a.userOp))
 	mux.HandleFunc("DELETE /api/users/{name}", a.auth(a.delUser))
@@ -222,6 +223,12 @@ type userView struct {
 	Subs         []linkView `json:"subs"`         // the two subscriptions
 	Expires      int64      `json:"expires"`      // end of the subscription, unix seconds, 0 = no limit
 	Account      bool       `json:"account"`      // registered on the site (managed in the "Сайт" tab)
+	OwnSubs      []string   `json:"own_subs"`     // list set for this user (null = by plan or default)
+	SubKeys      []string   `json:"sub_keys"`     // what he may take in the end
+	SubSource    string     `json:"sub_source"`   // user | plan | default
+	PlanID       int64      `json:"plan_id"`
+	SubFetched   int64      `json:"sub_fetched"`
+	SubFetches   int64      `json:"sub_fetches"`
 }
 
 // linkView is a link with its title (the panel shows a QR code for each).
@@ -231,7 +238,10 @@ type linkView struct {
 	Link  string `json:"link"`
 }
 
-func newUserView(cfg *Config, u User) userView {
+func newUserView(cfg *Config, u User) userView { return newUserViewB(cfg, u, nil) }
+
+// newUserViewB also names the bundles in the list of subscriptions.
+func newUserViewB(cfg *Config, u User, bundles map[string]string) userView {
 	v := userView{Name: u.Name, Enabled: u.Enabled, Gateway: userLink(cfg, cfg.getGatewayName(), u.UUID), Subscription: subURL(cfg, u.SubToken)}
 	if u.Expires != nil {
 		v.Expires = u.Expires.Unix()
@@ -243,13 +253,20 @@ func newUserView(cfg *Config, u User) userView {
 		}
 		v.Modes = append(v.Modes, linkView{k, "Балансировщик: " + modeTitle(m), modeLink(cfg, u, m)})
 	}
+	v.OwnSubs = u.Subs
+	v.SubKeys, v.SubSource = effectiveSubs(cfg, u)
+	if u.PlanID != nil {
+		v.PlanID = *u.PlanID
+	}
+	if u.SubFetched != nil {
+		v.SubFetched = u.SubFetched.Unix()
+	}
+	v.SubFetches = u.SubFetches
+	v.Subs = []linkView{}
 	if v.Subscription != "" {
-		v.Subs = []linkView{
-			{"balancers", "Подписка: только балансировщики", subURLKind(cfg, u.SubToken, "balancers")},
-			{"all", "Подписка: балансировщики + все серверы", subURLKind(cfg, u.SubToken, "all")},
+		for _, k := range v.SubKeys {
+			v.Subs = append(v.Subs, linkView{k, subTitle(k, bundles), subURLKind(cfg, u.SubToken, k)})
 		}
-	} else {
-		v.Subs = []linkView{}
 	}
 	return v
 }
@@ -278,8 +295,9 @@ func (a *API) users(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := []userView{}
+	names := a.bundleNames(r)
 	for _, u := range us {
-		out = append(out, newUserView(a.cfg, u))
+		out = append(out, newUserViewB(a.cfg, u, names))
 	}
 	writeJSON(w, 200, out)
 }
@@ -299,6 +317,11 @@ func (a *API) addUser(w http.ResponseWriter, r *http.Request) {
 	if _, err := a.store.AddUser(r.Context(), strings.TrimSpace(in.Name)); err != nil {
 		apiErr(w, 409, fmt.Errorf("не удалось создать (имя занято?): %v", err))
 		return
+	}
+	if d := a.cfg.defaultDays(); d > 0 { // user_default_days
+		if uid, err := a.store.UserIDByName(r.Context(), strings.TrimSpace(in.Name)); err == nil {
+			_ = a.store.SetUserExpiry(r.Context(), uid, ptrTime(time.Now().Add(time.Duration(d)*24*time.Hour)))
+		}
 	}
 	a.users(w, r)
 }

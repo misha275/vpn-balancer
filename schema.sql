@@ -153,3 +153,59 @@ CREATE TABLE IF NOT EXISTS acme_cache (
     data    BYTEA NOT NULL,
     updated TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- own nodes (not part of the balancer pool) and bundles of them; users get them only as subscriptions
+CREATE TABLE IF NOT EXISTS custom_nodes (
+    id      BIGSERIAL PRIMARY KEY,
+    name    TEXT NOT NULL,
+    link    TEXT NOT NULL,
+    note    TEXT NOT NULL DEFAULT '',
+    enabled BOOLEAN NOT NULL DEFAULT true,
+    created TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS bundles (
+    id      BIGSERIAL PRIMARY KEY,
+    slug    TEXT NOT NULL UNIQUE,
+    name    TEXT NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT true,
+    sort    INT NOT NULL DEFAULT 0,
+    created TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS bundle_nodes (
+    bundle_id BIGINT NOT NULL REFERENCES bundles(id) ON DELETE CASCADE,
+    node_id   BIGINT NOT NULL REFERENCES custom_nodes(id) ON DELETE CASCADE,
+    sort      INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (bundle_id, node_id)
+);
+-- which subscriptions a user may take: users.subs (NULL = by plan or default), plans.subs (NULL = default)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS subs TEXT[];
+ALTER TABLE users ADD COLUMN IF NOT EXISTS plan_id BIGINT REFERENCES plans(id) ON DELETE SET NULL;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS sub_fetched TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS sub_fetches BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE plans ADD COLUMN IF NOT EXISTS subs TEXT[];
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS plan_id BIGINT;
+
+-- external servers (version 3.2): sources are subscriptions imported into the same list; every server works in one of two modes:
+--   direct: users get the link of that server; via: users connect to this server (the gateway) and it forwards their traffic there
+CREATE TABLE IF NOT EXISTS ext_sources (
+    id        BIGSERIAL PRIMARY KEY,
+    name      TEXT NOT NULL,
+    url       TEXT NOT NULL,
+    mode      TEXT NOT NULL DEFAULT 'direct' CHECK (mode IN ('direct','via')),
+    enabled   BOOLEAN NOT NULL DEFAULT true,
+    refreshed TIMESTAMPTZ,
+    error     TEXT NOT NULL DEFAULT '',
+    created   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE custom_nodes ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'direct';
+ALTER TABLE custom_nodes ADD COLUMN IF NOT EXISTS source_id BIGINT REFERENCES ext_sources(id) ON DELETE CASCADE;
+ALTER TABLE custom_nodes ADD COLUMN IF NOT EXISTS uniq TEXT NOT NULL DEFAULT '';
+ALTER TABLE custom_nodes ADD COLUMN IF NOT EXISTS last_seen TIMESTAMPTZ NOT NULL DEFAULT now();
+CREATE UNIQUE INDEX IF NOT EXISTS custom_nodes_source_uniq ON custom_nodes(source_id, uniq) WHERE source_id IS NOT NULL;
+-- a category may contain the main server (its three balancers), single servers and whole sources
+ALTER TABLE bundles ADD COLUMN IF NOT EXISTS with_main BOOLEAN NOT NULL DEFAULT false;
+CREATE TABLE IF NOT EXISTS bundle_sources (
+    bundle_id BIGINT NOT NULL REFERENCES bundles(id) ON DELETE CASCADE,
+    source_id BIGINT NOT NULL REFERENCES ext_sources(id) ON DELETE CASCADE,
+    PRIMARY KEY (bundle_id, source_id)
+);

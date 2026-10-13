@@ -57,6 +57,7 @@ svg.chart text{fill:var(--muted);font-size:10px}
 svg.chart .gl{stroke:var(--line);stroke-width:1}
 .tip{position:absolute;top:0;pointer-events:none;background:var(--text);color:var(--bg);padding:5px 8px;border-radius:8px;font-size:12px;white-space:nowrap;display:none;z-index:3}
 .legend{display:flex;gap:14px;font-size:12px;color:var(--muted);margin-bottom:4px}
+.checks{display:flex;flex-wrap:wrap;gap:6px 18px;margin:8px 0}.checks label{display:flex;gap:6px;align-items:center;font-size:13px}.bars{width:100%;height:auto;display:block}.bars text{fill:var(--muted);font-size:9px}.bars .gl{stroke:var(--line);stroke-width:1}
 .legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
 .cgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:12px}
 @media (max-width:480px){.cgrid{grid-template-columns:1fr}}
@@ -118,7 +119,7 @@ $("#logout").onclick=()=>logout(false);
 $("#tokgo").onclick=async()=>{ TOKEN=$("#tok").value.trim(); try{ await api("GET","/api/overview"); sessionStorage.setItem("tok",TOKEN); start(); }catch(e){ $("#tokerr").textContent=e.message; } };
 $("#tok").addEventListener("keydown",e=>{ if(e.key==="Enter") $("#tokgo").click(); });
 
-const TABS=[["overview","Обзор"],["server","Сервер"],["clients","Клиенты"],["nodes","Узлы"],["settings","Настройки"],["users","Пользователи"],["wg","WireGuard"],["site","Сайт"],["console","Консоль"]];
+const TABS=[["overview","Обзор"],["server","Сервер"],["clients","Клиенты"],["nodes","Узлы"],["settings","Настройки"],["users","Пользователи"],["subs","Серверы"],["wg","WireGuard"],["site","Сайт"],["console","Консоль"]];
 function renderNav(){ const n=$("#nav"); n.replaceChildren(...TABS.map(([id,t])=>h("button",{class:id===TAB?"on":"",onclick:()=>{TAB=id;load();}},t))); }
 
 async function load(){
@@ -126,9 +127,10 @@ async function load(){
   try{
     if (TAB==="overview"||TAB==="nodes"){ DATA=await api("GET","/api/overview"); }
     if (TAB==="settings"){ SET=await api("GET","/api/settings"); }
-    if (TAB==="users"){ USERS=await api("GET","/api/users"); }
+    if (TAB==="users"){ [USERS,CAT,PLANS]=await Promise.all([api("GET","/api/users"),api("GET","/api/catalog"),api("GET","/api/plans")]); if(UEDIT&&UEDIT.mode==="stats"){ try{ UST=await api("GET","/api/users/"+encodeURIComponent(UEDIT.name)+"/stats"); }catch(e){ UST=null; } } }
+    if (TAB==="subs"){ CAT=await api("GET","/api/catalog"); }
     if (TAB==="wg"){ WG=await api("GET","/api/wg"); }
-    if (TAB==="site"){ [SITE,PLANS,ACCS,PAYS]=await Promise.all([api("GET","/api/site"),api("GET","/api/plans"),api("GET","/api/accounts"),api("GET","/api/payments")]); }
+    if (TAB==="site"){ [SITE,PLANS,ACCS,PAYS,CAT]=await Promise.all([api("GET","/api/site"),api("GET","/api/plans"),api("GET","/api/accounts"),api("GET","/api/payments"),api("GET","/api/catalog")]); }
     if (TAB==="server"){ [STAT,HIST]=await Promise.all([api("GET","/api/stats"),api("GET","/api/stats/history?range="+RANGE)]); }
     if (TAB==="clients"){ STAT=await api("GET","/api/stats"); }
     if (!DATA) DATA=await api("GET","/api/overview");
@@ -138,7 +140,7 @@ async function load(){
   st.className="pill "+(!DATA.ready||s.net_down?"bad":"ok");
   render();
 }
-function render(){ const m=$("#main"); m.replaceChildren(({overview:vOverview,server:vServer,clients:vClients,nodes:vNodes,settings:vSettings,users:vUsers,wg:vWG,site:vSite,console:vConsole})[TAB]()); }
+function render(){ const m=$("#main"); m.replaceChildren(({overview:vOverview,server:vServer,clients:vClients,nodes:vNodes,settings:vSettings,users:vUsers,subs:vSubs,wg:vWG,site:vSite,console:vConsole})[TAB]()); }
 
 function fmtSpeed(k){ return k>0? (k>=1000? (k/1000).toFixed(0)+" Мбит/с": k+" кбит/с") : "—"; }
 function nodeStatus(n){
@@ -369,8 +371,10 @@ function vSite(){
   const planRow=p=>{
     const n=h("input",{value:p.name,style:"width:150px"}), d=h("input",{type:"number",value:p.days,style:"width:80px",min:1}), pr=h("input",{type:"number",step:"0.01",min:0,value:(p.price_cents/100),style:"width:90px"}),
       cu=h("input",{value:p.currency,style:"width:60px"}), en=h("input",{type:"checkbox",checked:p.enabled,style:"width:auto"}), so=h("input",{type:"number",value:p.sort,style:"width:60px"});
-    const body=()=>({name:n.value,days:parseInt(d.value,10),price_cents:Math.round(parseFloat(pr.value||"0")*100),currency:cu.value,enabled:en.checked,sort:parseInt(so.value||"0",10)});
-    return h("tr",{},h("td",{},n),h("td",{},d),h("td",{},pr,cu),h("td",{},so),h("td",{},en),h("td",{},h("div",{class:"row"},
+    const sp=subsPicker(p.subs==null?null:p.subs,{inheritLabel:"как по умолчанию"});
+    const body=()=>({name:n.value,days:parseInt(d.value,10),price_cents:Math.round(parseFloat(pr.value||"0")*100),currency:cu.value,enabled:en.checked,sort:parseInt(so.value||"0",10),subs:sp.get()});
+    return h("tr",{},h("td",{},n),h("td",{},d),h("td",{},pr,cu),h("td",{},so),h("td",{},en),
+      h("td",{},h("details",{},h("summary",{class:"muted"},p.subs==null?"по умолчанию":p.subs.length+" подп."),sp.el)),h("td",{},h("div",{class:"row"},
       h("button",{class:"b s",onclick:()=>siteAct(p.id?"PUT":"POST",p.id?"/api/plans/"+p.id:"/api/plans",body(),"Тариф сохранён")},p.id?"Сохранить":"Добавить"),
       p.id?h("button",{class:"b d",onclick:()=>{ if(confirm("Удалить тариф «"+p.name+"»? Старые платежи останутся.")) siteAct("DELETE","/api/plans/"+p.id,undefined,"Удалено"); }},"Удалить"):null)));
   };
@@ -396,8 +400,8 @@ function vSite(){
       h("div",{class:"hint"},"Шлюз будет отдавать сайт браузерам на 443, а VPN-клиенты с ключом продолжат подключаться. Включается, только когда сертификат уже выпущен; ссылки пользователей получат домен вместо маскировки (клиентам нужно обновить подписку). Необязательно."),
       h("div",{class:"row",style:"margin-top:8px"},f.stg,h("label",{for:"f-stg"},"Тестовые сертификаты (для проверки, браузер им не доверяет)")),
       h("p",{},h("button",{class:"b",onclick:saveSite},"Сохранить"))),
-    h("div",{class:"card tw"},h("h2",{},"Тарифы"),h("table",{},h("tr",{},["Название","Дней","Цена","Порядок","Включён",""].map(t=>h("th",{},t))),
-      PLANS.map(planRow),planRow({id:0,name:"",days:30,price_cents:0,currency:"RUB",enabled:true,sort:PLANS.length}))),
+    h("div",{class:"card tw"},h("h2",{},"Тарифы"),h("table",{},h("tr",{},["Название","Дней","Цена","Порядок","Включён","Подписки тарифа",""].map(t=>h("th",{},t))),
+      PLANS.map(planRow),planRow({id:0,name:"",days:30,price_cents:0,currency:"RUB",enabled:true,sort:PLANS.length,subs:null})),h("div",{class:"hint"},"У тарифа свой набор подписок (в том числе категорий серверов). Он включается пользователю после оплаты этого тарифа; личный список пользователя важнее. Категории создаются во вкладке «Серверы».")),
     h("div",{class:"card tw"},h("h2",{},"Платежи"+(pending?" (ждут подтверждения: "+pending+")":"")),
       PAYS.length?h("table",{},h("tr",{},["№","Дата","Аккаунт","Тариф","Сумма","Статус",""].map(t=>h("th",{},t))),
         PAYS.map(p=>h("tr",{},h("td",{},p.id),h("td",{class:"muted"},fmtDate(Date.parse(p.created)/1000)),h("td",{},p.email),h("td",{},p.plan_name+" ("+p.days+" дн.)"),
@@ -413,6 +417,7 @@ function vSite(){
           h("td",{},fmtBytes(a.traffic_30)+" / "+fmtBytes(a.traffic_all)),h("td",{class:"muted"},a.last_login?fmtAgo(a.last_login):"не входил"),
           h("td",{},h("input",{value:a.note||"",style:"width:120px",onchange:e=>siteAct("POST","/api/accounts/"+a.id+"/note",{note:e.target.value})})),
           h("td",{},h("div",{class:"row"},
+            h("button",{class:"b s",onclick:()=>{ UEDIT={name:a.user,mode:"stats"}; TAB="users"; load(); }},"Статистика"),
             h("button",{class:"b s",onclick:()=>{ const e=expiryAsk("Срок доступа для "+a.email); if(e) siteAct("POST","/api/accounts/"+a.id+"/expiry",e,"Срок изменён"); }},"Срок"),
             h("button",{class:"b s",onclick:()=>siteAct("POST","/api/accounts/"+a.id+"/expiry",{extend_days:30},"+30 дней")},"+30 дн."),
             h("button",{class:"b "+(a.blocked?"s":"d"),onclick:()=>siteAct("POST","/api/accounts/"+a.id+"/"+(a.blocked?"unblock":"block"),undefined,a.blocked?"Разблокирован":"Заблокирован, ключ отключён")},a.blocked?"Разблок.":"Блок"),
@@ -434,17 +439,160 @@ async function showQR(title,text){
     img.src="data:image/png;base64,"+btoa(bin);
   }catch(e){ img.replaceWith(h("div",{class:"bad"},"Не удалось построить QR: "+e.message)); }
 }
+function modeName(m){ return !m?"текущий":m==="speed"?"лучшая скорость":m==="ping"?"лучший пинг":/^x\d+$/.test(m)?"внешний сервер №"+m.slice(1):m; }
+// ---- external servers, categories, who may take what
+let CAT=null, UEDIT=null, UST=null;
+// selected: list of keys, or null = "inherit" (the checkbox with o.inheritLabel is on)
+function subsPicker(selected,o){
+  o=o||{}; const cat=CAT?CAT.subs:[];
+  const inh=o.inheritLabel?h("input",{type:"checkbox",checked:selected==null,style:"width:auto"}):null;
+  const base=selected||o.fallback||[];
+  const boxes=cat.map(x=>({key:x.key,title:x.title,el:h("input",{type:"checkbox",checked:base.includes(x.key),style:"width:auto"})}));
+  const wrap=h("div",{},inh?h("label",{class:"row",style:"gap:6px;font-size:13px"},inh,o.inheritLabel):null,
+    h("div",{class:"checks"},boxes.map(b=>h("label",{},b.el,b.title))));
+  const sync=()=>boxes.forEach(b=>b.el.disabled=!!(inh&&inh.checked));
+  if(inh) inh.onchange=sync; sync();
+  return {el:wrap,get:()=>inh&&inh.checked?null:boxes.filter(b=>b.el.checked).map(b=>b.key)};
+}
+function subSource(u){ return u.sub_source==="user"?"список пользователя":u.sub_source==="plan"?"по тарифу"+((PLANS.find(p=>p.id===u.plan_id)||{}).name?" «"+PLANS.find(p=>p.id===u.plan_id).name+"»":""):"по умолчанию"; }
+async function catAct(method,path,body,msg){ try{ CAT=await api(method,path,body); if(msg) toast(msg); render(); return true; }catch(e){ toast(e.message,true); return false; } }
+
+function vSubs(){
+  if(!CAT) return h("div",{class:"hint"},"загрузка…");
+  // defaults
+  const dp=subsPicker(CAT.default_subs,{}), dd=h("input",{type:"number",min:0,max:3660,value:CAT.default_days,style:"width:90px"});
+  const defCard=h("div",{class:"card"},h("h2",{},"Параметры пользователей по умолчанию"),
+    h("div",{class:"k"},"Какие подписки доступны, если у пользователя и его тарифа нет своего списка"),dp.el,
+    h("div",{class:"row"},h("span",{class:"muted"},"Срок доступа для созданных в панели, дней (0 = без срока):"),dd),
+    h("div",{class:"hint"},"По умолчанию доступна только категория «Основная: 3 балансировщика». Пользователь без доступа к основному серверу (ни напрямую, ни через категорию с отметкой «3 балансировщика») не получает ключ для балансировщика, у него остаются только его категории. Новым людям с сайта срок задаёт настройка сайта «бесплатных дней»."),
+    h("p",{},h("button",{class:"b",onclick:async()=>{ await save({user_default_subs:dp.get(),user_default_days:parseInt(dd.value||"0",10)}); CAT=await api("GET","/api/catalog"); render(); }},"Сохранить")));
+  const modeSel=cur=>{ const m=h("select",{style:"width:auto"},h("option",{value:"direct"},"отдать ссылку"),h("option",{value:"via"},"через основной сервер")); m.value=cur||"direct"; return m; };
+  // external subscriptions (sources)
+  const srcRow=x=>{
+    const nm=h("input",{value:x.name,style:"width:150px",placeholder:"название"}), md=modeSel(x.mode), en=h("input",{type:"checkbox",checked:x.enabled,style:"width:auto"}),
+      ur=h("input",{placeholder:x.id?"новый адрес":"адрес подписки https://…",type:"password",autocomplete:"off",style:x.id?"width:140px":"width:230px"});
+    const body=()=>({name:nm.value,mode:md.value,enabled:en.checked,url:ur.value});
+    const st=x.error?h("div",{class:"bad",style:"font-size:12px",title:x.error},"ошибка: "+x.error.slice(0,80)):h("div",{class:"muted",style:"font-size:12px"},x.refreshed?"обновлена "+fmtDT(x.refreshed):"ещё не загружена");
+    return h("tr",{},h("td",{},nm),h("td",{class:"muted"},x.id?x.host:ur),h("td",{},md),h("td",{},x.id?h("div",{},x.nodes+" серв.",st):null),h("td",{},en),h("td",{},x.id?ur:null),
+      h("td",{},h("div",{class:"row"},
+        h("button",{class:"b s",onclick:()=>catAct(x.id?"PUT":"POST",x.id?"/api/ext-sources/"+x.id:"/api/ext-sources",body(),x.id?"Подписка сохранена":"Подписка добавлена")},x.id?"Сохранить":"Добавить"),
+        x.id?h("button",{class:"b s",onclick:()=>catAct("POST","/api/ext-sources/"+x.id+"/refresh",undefined,"Обновлено")},"Обновить"):null,
+        x.id?h("button",{class:"b d",onclick:()=>{ if(confirm("Удалить подписку «"+x.name+"» вместе с её серверами?")) catAct("DELETE","/api/ext-sources/"+x.id,undefined,"Удалена"); }},"Удалить"):null)));
+  };
+  const sources=h("div",{class:"card tw"},h("h2",{},"Подписки внешних серверов"),
+    h("div",{class:"hint"},"Серверы отдельно от балансировщика: они не проверяются и не участвуют в выборе узла. Подписка загружается автоматически, режим задаётся на всю подписку. Адрес подписки после сохранения нигде не показывается."),
+    h("table",{},h("tr",{},["Название","Адрес","Режим","Серверов","Включена","Заменить адрес",""].map(t=>h("th",{},t))),
+      (CAT.sources||[]).map(srcRow),srcRow({id:0,name:"",mode:"direct",enabled:true})));
+  // single servers
+  const nodeRow=n=>{
+    const nm=h("input",{value:n.name,style:"width:150px"}), nt=h("input",{value:n.note||"",style:"width:110px"}), en=h("input",{type:"checkbox",checked:n.enabled,style:"width:auto"}), md=modeSel(n.mode),
+      lk=h("input",{placeholder:n.id?"новая ссылка":"ссылка vless:// vmess:// trojan:// ss:// hysteria2://",class:n.id?"":"grow",style:n.id?"width:140px":"",type:"password",autocomplete:"off"});
+    const body=()=>({name:nm.value,note:nt.value,enabled:en.checked,link:lk.value,mode:md.value});
+    return h("tr",{},h("td",{},nm),h("td",{class:"muted"},n.id?h("div",{},n.type+" · "+n.server+":"+n.port,h("div",{style:"font-size:11px"},n.bundles?"в "+n.bundles+" катег.":"ни в одной категории")):lk),h("td",{},md),h("td",{},nt),h("td",{},en),
+      h("td",{},n.id?lk:null),h("td",{},h("div",{class:"row"},
+        h("button",{class:"b s",onclick:()=>catAct(n.id?"PUT":"POST",n.id?"/api/custom-nodes/"+n.id:"/api/custom-nodes",body(),n.id?"Сервер сохранён":"Сервер добавлен")},n.id?"Сохранить":"Добавить"),
+        n.id?h("button",{class:"b d",onclick:()=>{ if(confirm("Удалить сервер «"+n.name+"»? Он исчезнет из всех категорий.")) catAct("DELETE","/api/custom-nodes/"+n.id,undefined,"Удалён"); }},"Удалить"):null)));
+  };
+  const nodes=h("div",{class:"card tw"},h("h2",{},"Отдельные серверы (по ссылке)"),
+    h("div",{class:"hint"},"«Отдать ссылку»: пользователь получает ссылку на этот сервер в подписке. «Через основной сервер»: пользователь подключается к вашему шлюзу (отдельный ключ), а шлюз пересылает трафик на этот сервер; ссылка на него пользователю не раскрывается. Пользователи получают серверы только внутри подписок-категорий. Ссылка нигде не показывается после сохранения."),
+    h("table",{},h("tr",{},["Название","Тип и адрес / ссылка","Режим","Заметка","Включён","Заменить ссылку",""].map(t=>h("th",{},t))),
+      CAT.nodes.map(nodeRow),nodeRow({id:0,name:"",note:"",enabled:true,bundles:0,mode:"direct"})));
+  // categories
+  const bundleRow=b=>{
+    const nm=h("input",{value:b.name,style:"width:150px",placeholder:"название"}), sl=h("input",{value:b.slug,style:"width:100px",placeholder:"адрес",disabled:!!b.id,title:"латиница, цифры, дефис; потом не меняется"}),
+      en=h("input",{type:"checkbox",checked:b.enabled,style:"width:auto"}), so=h("input",{type:"number",value:b.sort,style:"width:60px"}), mn=h("input",{type:"checkbox",checked:!!b.main,style:"width:auto"});
+    const sel=new Set(b.nodes||[]), ssel=new Set(b.sources||[]);
+    const boxes=CAT.nodes.map(n=>({id:n.id,el:h("input",{type:"checkbox",checked:sel.has(n.id),style:"width:auto"}),n}));
+    const sboxes=(CAT.sources||[]).map(x=>({id:x.id,el:h("input",{type:"checkbox",checked:ssel.has(x.id),style:"width:auto"}),x}));
+    const body=()=>({name:nm.value,slug:sl.value,enabled:en.checked,sort:parseInt(so.value||"0",10),main:mn.checked,nodes:boxes.filter(x=>x.el.checked).map(x=>x.id),sources:sboxes.filter(x=>x.el.checked).map(x=>x.id)});
+    const cnt=(b.nodes||[]).length+" серв."+((b.sources||[]).length?" + "+(b.sources||[]).length+" подп.":"");
+    return h("tr",{},h("td",{},nm),h("td",{},sl,b.id?h("div",{class:"muted mono",style:"font-size:11px"},"/sub/…/b/"+b.slug):null),h("td",{},so),h("td",{},en),
+      h("td",{},h("label",{class:"row",style:"gap:6px"},mn,"3 балансировщика")),
+      h("td",{},h("details",{},h("summary",{class:"muted"},cnt),
+        h("div",{class:"k"},"Серверы"),h("div",{class:"checks"},boxes.length?boxes.map(x=>h("label",{},x.el,x.n.name+" ("+(x.n.mode==="via"?"через основной":"ссылка")+")")):h("span",{class:"muted"},"нет отдельных серверов")),
+        h("div",{class:"k"},"Подписки"),h("div",{class:"checks"},sboxes.length?sboxes.map(x=>h("label",{},x.el,x.x.name+" ("+x.x.nodes+")")):h("span",{class:"muted"},"нет подписок")))),
+      h("td",{},h("div",{class:"row"},h("button",{class:"b s",onclick:()=>catAct(b.id?"PUT":"POST",b.id?"/api/bundles/"+b.id:"/api/bundles",body(),b.id?"Категория сохранена":"Категория создана")},b.id?"Сохранить":"Создать"),
+        b.id?h("button",{class:"b d",onclick:()=>{ if(confirm("Удалить категорию «"+b.name+"»? Она пропадёт из списков пользователей и тарифов (сами серверы останутся).")) catAct("DELETE","/api/bundles/"+b.id,undefined,"Удалена"); }},"Удалить"):null)));
+  };
+  const bundles=h("div",{class:"card tw"},h("h2",{},"Категории"),
+    h("div",{class:"hint"},"Встроенная категория «Основная» всегда есть: в ней только 3 балансировщика (она и есть группа по умолчанию). Остальные создавайте сколько нужно: в категорию можно добавить серверы, подписки и основной сервер (отметка «3 балансировщика»). Без этой отметки основной сервер для категории работает только как концентратор: пропускает трафик к внешним серверам или просто раздаёт подписку. Кому доступна категория, задаётся в списке подписок пользователя, у тарифа или по умолчанию."),
+    h("table",{},h("tr",{},["Название","Адрес","Порядок","Включена","Основной сервер","Состав",""].map(t=>h("th",{},t))),
+      CAT.bundles.map(bundleRow),bundleRow({id:0,name:"",slug:"",enabled:true,sort:CAT.bundles.length,main:false,nodes:[],sources:[]})));
+  return h("div",{},sources,nodes,bundles,defCard);
+}
+
+// ---- statistics of one user
+function bars(title,pts,o){
+  const box=h("div",{class:"card"},h("h2",{},title));
+  const W=560,H=150,L=58,R=6,T=8,B=20, n=pts.length;
+  const max=niceMax(Math.max(1,...pts.map(p=>p.up+p.down)));
+  const bw=(W-L-R)/n, svg=sv("svg",{class:"bars",viewBox:"0 0 "+W+" "+H});
+  for(let i=0;i<=2;i++){ const v=max*i/2, y=T+(H-T-B)*(1-v/max); svg.append(sv("line",{class:"gl",x1:L,x2:W-R,y1:y,y2:y})); const tx=sv("text",{x:L-4,y:y+3,"text-anchor":"end"}); tx.textContent=fmtBytes(v); svg.append(tx); }
+  pts.forEach((p,i)=>{
+    const x=L+i*bw, hd=(H-T-B)*p.down/max, hu=(H-T-B)*p.up/max, y0=H-B;
+    const g=sv("g",{}); const t=sv("title",{}); t.textContent=o.label(p)+": ↓ "+fmtBytes(p.down)+" ↑ "+fmtBytes(p.up); g.append(t);
+    g.append(sv("rect",{x:x+1,y:y0-hd,width:Math.max(1,bw-2),height:hd,fill:"var(--c1)"}));
+    g.append(sv("rect",{x:x+1,y:y0-hd-hu,width:Math.max(1,bw-2),height:hu,fill:"var(--c3)"}));
+    g.append(sv("rect",{x:x,y:T,width:bw,height:H-T-B,fill:"transparent"}));
+    svg.append(g);
+    if(i%o.every===0){ const tx=sv("text",{x:x+bw/2,y:H-6,"text-anchor":"middle"}); tx.textContent=o.tick(p); svg.append(tx); }
+  });
+  box.append(h("div",{class:"legend"},h("span",{},h("i",{style:"background:var(--c1)"}),"скачано ↓"),h("span",{},h("i",{style:"background:var(--c3)"}),"отправлено ↑")),svg);
+  return box;
+}
+function userStatsCard(){
+  const s=UST; if(!s) return h("div",{class:"card"},h("span",{class:"muted"},"Статистика недоступна."));
+  const plan=s.plan?" · тариф «"+s.plan+"»":"";
+  const tot=x=>fmtBytes(x);
+  const head=h("div",{class:"card"},h("div",{class:"row"},h("h2",{style:"margin:0"},"Статистика: "+s.name+(s.email&&s.email!==s.name?" ("+s.email+")":"")),
+      h("button",{class:"b s",onclick:()=>{ UEDIT=null; UST=null; render(); }},"Закрыть"),h("button",{class:"b s",onclick:()=>load()},"Обновить")),
+    h("div",{class:"hint"},(s.enabled?"включён":"отключён")+" · "+(s.expires?"до "+fmtDate(s.expires):"без срока")+plan+" · подписки: "+(s.sub_keys||[]).map(k=>(CAT&&CAT.subs.find(x=>x.key===k)||{title:k}).title).join("; ")));
+  const g=h("div",{class:"grid"},
+    card("Сейчас",s.online?"онлайн, "+s.sessions.length+" подкл.":"не в сети",s.online?"ok":"muted"),
+    card("Скорость сейчас","↓ "+fmtBits(s.speed_down)+" ↑ "+fmtBits(s.speed_up)),
+    card("Сегодня",tot(s.today)),card("7 дней",tot(s.last7)),card("30 дней",tot(s.last30)),
+    card("Всего","↓ "+tot(s.all_down)+" ↑ "+tot(s.all_up)),card("Подключений за всё время",String(s.all_conns)),
+    card("Последняя активность",s.last_seen?fmtAgo(s.last_seen)+(s.last_ip?" · "+s.last_ip:""):"никогда"),
+    card("Самый активный час (UTC)",s.busiest_hour>=0?String(s.busiest_hour).padStart(2,"0")+":00":"—"),
+    card("Скачиваний подписки",s.sub_fetches+(s.sub_fetched?" · последнее "+fmtAgo(s.sub_fetched):"")),
+    card("Ошибки подключений",s.errors?String(s.errors):"нет",s.errors?"warn":"")
+  );
+  const ses=(s.sessions&&s.sessions.length)?h("div",{class:"card tw"},h("h2",{},"Открытые подключения"),h("table",{},h("tr",{},["Адрес","Давно","Режим","↑","↓"].map(t=>h("th",{},t))),
+    s.sessions.map(x=>h("tr",{},h("td",{class:"mono"},x.ip),h("td",{},fmtDur((Date.now()-Date.parse(x.since))/1000)),h("td",{},modeName(x.mode)),h("td",{},fmtBytes(x.up)),h("td",{},fmtBytes(x.down)))))):null;
+  const err=s.last_error?h("div",{class:"card"},h("div",{class:"k"},"Последняя ошибка"),h("div",{class:"mono bad",style:"word-break:break-all"},s.last_error)):null;
+  return h("div",{},head,g,
+    bars("Трафик по дням (30 дней, UTC)",s.days,{every:5,tick:p=>p.day.slice(5),label:p=>p.day}),
+    bars("Трафик по часам (48 часов)",s.hours,{every:6,tick:p=>fmtT(p.t),label:p=>fmtT(p.t,true)}),ses,err);
+}
+
+function userSubsCard(u){
+  const sp=subsPicker(u.own_subs==null?null:u.own_subs,{inheritLabel:"как по тарифу или по умолчанию (сейчас: "+subSource(u)+")",fallback:u.sub_keys});
+  const pl=h("select",{style:"width:auto"},h("option",{value:0},"— без тарифа —"),PLANS.map(p=>h("option",{value:p.id,selected:p.id===u.plan_id},p.name)));
+  return h("div",{class:"card"},h("div",{class:"row"},h("h2",{style:"margin:0"},"Подписки пользователя «"+u.name+"»"),h("button",{class:"b s",onclick:()=>{ UEDIT=null; render(); }},"Закрыть")),
+    sp.el,
+    h("div",{class:"row"},h("button",{class:"b",onclick:async()=>{ try{ USERS=await api("POST","/api/users/"+encodeURIComponent(u.name)+"/subs",{subs:sp.get()}); toast("Подписки сохранены, шлюз обновится в течение 30 секунд"); render(); }catch(e){ toast(e.message,true);} }},"Сохранить список")),
+    h("div",{class:"row",style:"margin-top:10px"},h("span",{class:"muted"},"Тариф (из него берутся подписки, если нет личного списка):"),pl,
+      h("button",{class:"b s",onclick:async()=>{ try{ USERS=await api("POST","/api/users/"+encodeURIComponent(u.name)+"/plan",{plan_id:parseInt(pl.value,10)}); toast("Тариф назначен"); render(); }catch(e){ toast(e.message,true);} }},"Назначить")));
+}
+async function openStats(name){ UEDIT={name,mode:"stats"}; try{ UST=await api("GET","/api/users/"+encodeURIComponent(name)+"/stats"); }catch(e){ UST=null; toast(e.message,true); } render(); }
+
 function vUsers(){
   const name=h("input",{placeholder:"имя пользователя",class:"grow",maxlength:64});
+  const edit=UEDIT&&UEDIT.mode==="subs"?USERS.find(x=>x.name===UEDIT.name):null;
   return h("div",{},
-    h("div",{class:"card"},h("h2",{},"Новый пользователь"),h("div",{class:"row"},name,h("button",{class:"b",onclick:async()=>{ try{ USERS=await api("POST","/api/users",{name:name.value}); toast("Пользователь создан, он появится в шлюзе в течение 2-3 минут"); render(); }catch(e){ toast(e.message,true);} }},"Создать"))),
+    UEDIT&&UEDIT.mode==="stats"?userStatsCard():null,
+    edit?userSubsCard(edit):null,
+    h("div",{class:"card"},h("h2",{},"Новый пользователь"),h("div",{class:"row"},name,h("button",{class:"b",onclick:async()=>{ try{ USERS=await api("POST","/api/users",{name:name.value}); toast("Пользователь создан, он появится в шлюзе в течение 2-3 минут"); render(); }catch(e){ toast(e.message,true);} }},"Создать")),
+      CAT&&CAT.default_days?h("div",{class:"hint"},"Новым пользователям выдаётся срок "+CAT.default_days+" дн. (настройка по умолчанию во вкладке «Серверы»)."):null),
     h("div",{class:"card tw"},h("table",{},h("tr",{},h("th",{},"Имя"),h("th",{},"Статус"),h("th",{},"Ссылки"),h("th",{},"")),
       USERS.map(u=>h("tr",{},
-        h("td",{},u.name),h("td",{},h("span",{class:u.enabled?"ok":"muted"},u.enabled?"включён":"отключён"),h("div",{class:"muted"},u.expires?"до "+fmtDate(u.expires)+(u.expires*1000<Date.now()?" (вышел)":""):"без срока"),
+        h("td",{},u.name,h("div",{class:"muted"},"подписки: "+subSource(u)),h("div",{class:"muted"},u.sub_fetches?("скачана "+u.sub_fetches+" раз, "+fmtAgo(u.sub_fetched)):"подписку ещё не скачивали")),
+        h("td",{},h("span",{class:u.enabled?"ok":"muted"},u.enabled?"включён":"отключён"),h("div",{class:"muted"},u.expires?"до "+fmtDate(u.expires)+(u.expires*1000<Date.now()?" (вышел)":""):"без срока"),
           h("button",{class:"b s",style:"margin-top:4px",onclick:async()=>{ const e=expiryAsk("Срок доступа для «"+u.name+"»"); if(!e) return; try{ USERS=await api("POST","/api/users/"+encodeURIComponent(u.name)+"/expiry",e); toast("Срок изменён"); render(); }catch(x){ toast(x.message,true);} }},"Срок")),
-        h("td",{},(u.modes||[]).map(l=>linkRow(l)),(u.subs&&u.subs.length)?u.subs.map(l=>linkRow(l)):h("div",{class:"hint"},"подписки выключены (sub_listen)")),
-        h("td",{},h("button",{class:"b "+(u.enabled?"d":"s"),onclick:async()=>{ try{ USERS=await api("POST","/api/users/"+encodeURIComponent(u.name)+"/"+(u.enabled?"disable":"enable")); render(); }catch(e){ toast(e.message,true);} }},u.enabled?"Отключить":"Включить"),
-          " ",h("button",{class:"b d",title:"удалить навсегда",onclick:async()=>{ if(!confirm("Удалить пользователя «"+u.name+"» навсегда?\nЕго ссылка перестанет работать, статистика будет стёрта. Отключить без удаления можно кнопкой «Отключить».")) return; try{ USERS=await api("DELETE","/api/users/"+encodeURIComponent(u.name)); toast("Пользователь удалён, из шлюза исчезнет в течение 30 секунд"); render(); }catch(e){ toast(e.message,true);} }},"Удалить")))))));
+        h("td",{},(u.sub_keys||[]).some(k=>k==="balancers"||k==="all"||(CAT&&CAT.bundles.some(b=>b.main&&"b:"+b.slug===k)))?(u.modes||[]).map(l=>linkRow(l)):null,(u.subs&&u.subs.length)?u.subs.map(l=>linkRow(l)):h("div",{class:"hint"},"подписки выключены (задайте домен и включите сайт или sub_listen)")),
+        h("td",{},h("div",{class:"row"},h("button",{class:"b s",onclick:()=>openStats(u.name)},"Статистика"),h("button",{class:"b s",onclick:()=>{ UEDIT={name:u.name,mode:"subs"}; render(); window.scrollTo(0,0); }},"Подписки"),
+          h("button",{class:"b "+(u.enabled?"d":"s"),onclick:async()=>{ try{ USERS=await api("POST","/api/users/"+encodeURIComponent(u.name)+"/"+(u.enabled?"disable":"enable")); render(); }catch(e){ toast(e.message,true);} }},u.enabled?"Отключить":"Включить"),
+          h("button",{class:"b d",title:"удалить навсегда",onclick:async()=>{ if(!confirm("Удалить пользователя «"+u.name+"» навсегда?\nЕго ссылка перестанет работать, статистика будет стёрта. Отключить без удаления можно кнопкой «Отключить».")) return; try{ USERS=await api("DELETE","/api/users/"+encodeURIComponent(u.name)); toast("Пользователь удалён, из шлюза исчезнет в течение 30 секунд"); render(); }catch(e){ toast(e.message,true);} }},"Удалить"))))))));
 }
 
 // ---------------------------------------------------------------- statistics

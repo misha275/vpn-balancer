@@ -51,6 +51,18 @@ func modeUser(name, mode string) string {
 
 // foldUser maps the user name seen in the gateway logs back to the real user and the mode.
 func foldUser(name string) (base, mode string) {
+	if i := strings.LastIndex(name, "~x"); i > 0 && i+2 < len(name) {
+		digits := name[i+2:]
+		ok := true
+		for _, r := range digits {
+			if r < '0' || r > '9' {
+				ok = false
+			}
+		}
+		if ok {
+			return name[:i], "x" + digits
+		}
+	}
 	for _, m := range balModes {
 		if strings.HasSuffix(name, "~"+m) && len(name) > len(m)+1 {
 			return strings.TrimSuffix(name, "~"+m), m
@@ -98,6 +110,9 @@ func modeLinks(cfg *Config, u User) []string {
 func modeUsers(users []User, mode string) []string {
 	out := make([]string, 0, len(users))
 	for _, u := range users {
+		if u.NoBalancer {
+			continue
+		}
 		out = append(out, modeUser(u.Name, mode))
 	}
 	return out

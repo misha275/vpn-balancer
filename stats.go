@@ -448,3 +448,19 @@ func (c *Collector) View(ctx context.Context) (*StatsView, error) {
 	}
 	return v, nil
 }
+
+// LiveOf returns what the gateway reports about one user right now: open connections, the error counter, the current speed.
+func (c *Collector) LiveOf(name string) (sess []SessInfo, e *UserErr, speed UserDelta) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	sess = []SessInfo{}
+	for _, se := range c.gw.Sessions {
+		if se.User == name {
+			sess = append(sess, se)
+		}
+	}
+	if x, ok := c.gw.Errs[name]; ok {
+		e = &x
+	}
+	return sess, e, c.speed[name]
+}

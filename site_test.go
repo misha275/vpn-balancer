@@ -258,7 +258,7 @@ func TestSiteRegistrationCabinetAndTraffic(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("cabinet: %d", code)
 	}
-	for _, want := range []string{"anna@example.com", "Активна", "осталось 3 дня", "5.00 МБ", "↑ 1.00 МБ", "↓ 4.00 МБ", "/sub/" + acc.SubToken + "/balancers", "/sub/" + acc.SubToken + "\"",
+	for _, want := range []string{"anna@example.com", "Активна", "осталось 3 дня", "5.00 МБ", "↑ 1.00 МБ", "↓ 4.00 МБ", "/sub/" + acc.SubToken + "/balancers", "/sub/" + acc.SubToken + "/all\"",
 		modeUUID(acc.UUID, modeSpeed)} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the cabinet must show %q", want)

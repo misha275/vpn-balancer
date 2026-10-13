@@ -82,6 +82,18 @@ func RenderSub(cfg *Config, u *User, nodes []*Node) []string {
 	return lines
 }
 
+func dedupe(in []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, l := range in {
+		if !seen[l] {
+			seen[l] = true
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
 func clientIP(r *http.Request) string {
 	h, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -132,20 +144,72 @@ func (s *SubServer) Handler() http.Handler {
 				http.NotFound(w, r) // same answer for wrong token and disabled user
 				return
 			}
-			var body string
+			keys, _ := effectiveSubs(s.cfg, *u)
 			title := s.cfg.getGatewayName()
-			if kind == "balancers" {
-				body = strings.Join(RenderBalancers(s.cfg, u), "\n")
-				title += " · балансировщики"
-			} else {
-				nodes, err := s.store.ActiveNodes(ctx, s.cfg.NodeGrace)
-				if err != nil {
-					log.Printf("sub: nodes: %v", err)
+			ix, err := s.store.LoadSubIndex(ctx)
+			if err != nil {
+				log.Printf("sub: index: %v", err)
+				http.Error(w, "temporary error", http.StatusServiceUnavailable)
+				return
+			}
+			var lines []string
+			missing := false // the requested category does not exist (any more) or is switched off
+			want := kind
+			add := func(kind string) bool { // appends the lines of one subscription; false = temporary failure
+				switch {
+				case kind == subBalancers:
+					lines = append(lines, RenderBalancers(s.cfg, u)...)
+				case kind == subAll:
+					nodes, err := s.store.ActiveNodes(ctx, s.cfg.NodeGrace)
+					if err != nil {
+						log.Printf("sub: nodes: %v", err)
+						return false
+					}
+					lines = append(lines, RenderSub(s.cfg, u, nodes)...)
+				case strings.HasPrefix(kind, bundlePrefix):
+					name, ls, ok := ix.lines(s.cfg, *u, kind[len(bundlePrefix):])
+					if !ok {
+						missing = true
+						break
+					}
+					lines = append(lines, ls...)
+					if want == "bundle" {
+						title += " · " + name
+					}
+				}
+				return true
+			}
+			switch {
+			case want == "union":
+				for _, k := range keys {
+					if !add(k) {
+						http.Error(w, "temporary error", http.StatusServiceUnavailable)
+						return
+					}
+				}
+			default:
+				key := want
+				if want == "bundle" {
+					key = bundlePrefix + r.PathValue("slug")
+				}
+				if !hasSub(keys, key) {
+					http.Error(w, "this subscription is not available for the account", http.StatusForbidden)
+					return
+				}
+				if key == subBalancers {
+					title += " · балансировщики"
+				}
+				if !add(key) {
 					http.Error(w, "temporary error", http.StatusServiceUnavailable)
 					return
 				}
-				body = strings.Join(RenderSub(s.cfg, u, nodes), "\n")
+				if missing {
+					http.NotFound(w, r)
+					return
+				}
 			}
+			go s.store.NoteSubFetch(context.Background(), u.ID)
+			body := strings.Join(dedupe(lines), "\n")
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("profile-update-interval", "6")
@@ -157,9 +221,10 @@ func (s *SubServer) Handler() http.Handler {
 			fmt.Fprint(w, base64.StdEncoding.EncodeToString([]byte(body)))
 		}
 	}
-	mux.HandleFunc("GET /sub/{token}", serve("all"))
-	mux.HandleFunc("GET /sub/{token}/all", serve("all"))
-	mux.HandleFunc("GET /sub/{token}/balancers", serve("balancers"))
+	mux.HandleFunc("GET /sub/{token}", serve("union")) // everything the account may take
+	mux.HandleFunc("GET /sub/{token}/all", serve(subAll))
+	mux.HandleFunc("GET /sub/{token}/balancers", serve(subBalancers))
+	mux.HandleFunc("GET /sub/{token}/b/{slug}", serve("bundle"))
 	return mux
 }
 

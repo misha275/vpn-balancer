@@ -50,7 +50,7 @@ const siteTplText = `
 {{define "home"}}{{template "head" .}}
 <div class="card"><h1>{{.Site}}</h1><p>Быстрый и стабильный VPN. Зарегистрируйтесь, получите ссылку на подписку и подключите её в приложении за минуту.</p>
 {{if .Email}}<a class="btn" href="/cabinet">Открыть кабинет</a>{{else}}{{if .CanRegister}}<a class="btn" href="/register">Зарегистрироваться{{if .Trial}} (бесплатно {{.Trial}}){{end}}</a> {{end}}<a class="btn s" href="/login">Войти</a>{{end}}</div>
-{{if .Plans}}<h2>Тарифы</h2><div class="grid">{{range .Plans}}<div class="card plan"><div>{{.Name}}</div><div class="price">{{.Price}}</div><div class="muted">{{.Days}} дн.</div></div>{{end}}</div>{{end}}
+{{if .Plans}}<h2>Тарифы</h2><div class="grid">{{range .Plans}}<div class="card plan"><div>{{.Name}}</div><div class="price">{{.Price}}</div><div class="muted">{{.Days}} дн.</div>{{if .Has}}<div class="muted" style="font-size:13px;margin-top:6px">{{range $i, $h := .Has}}{{if $i}}, {{end}}{{$h}}{{end}}</div>{{end}}</div>{{end}}</div>{{end}}
 {{template "foot" .}}{{end}}
 
 {{define "login"}}{{template "head" .}}
@@ -93,6 +93,7 @@ const siteTplText = `
 {{range .Links}}<div class="row"><b style="min-width:230px">{{.Title}}</b></div>
 <div class="row"><input id="l-{{.Kind}}" readonly value="{{.URL}}" aria-label="{{.Title}}"><button class="btn s sm" type="button" data-copy="l-{{.Kind}}">Копировать</button></div>
 <details><summary>QR-код</summary><img loading="lazy" alt="QR-код: {{.Title}}" src="/qr/{{.Kind}}" width="240" height="240"></details>{{end}}
+{{if not .Links}}<p class="muted">Для вашего аккаунта сейчас нет доступных подписок. Напишите в поддержку.</p>{{end}}
 {{if .Hint}}<p class="muted">{{.Hint}}</p>{{end}}</div>
 
 {{if .Payments}}<div class="card"><h2>Платежи</h2><table><tr><th>Дата</th><th>Тариф</th><th>Сумма</th><th>Статус</th></tr>
@@ -110,7 +111,7 @@ const siteTplText = `
 {{else if eq .Payment "manual"}}<div class="note">Онлайн-оплата пока не подключена. После заявки администратор подтвердит оплату вручную, срок продлится сразу после подтверждения.</div>{{end}}
 {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
 {{if .Plans}}<div class="grid">{{range .Plans}}<form method="post" action="/pay" class="card plan"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="plan" value="{{.ID}}">
-<div>{{.Name}}</div><div class="price">{{.Price}}</div><div class="muted">{{.Days}} дн.</div><button class="btn">{{if eq $.Payment "stub_auto"}}Оплатить (тест){{else}}Оставить заявку{{end}}</button></form>{{end}}</div>
+<div>{{.Name}}</div><div class="price">{{.Price}}</div><div class="muted">{{.Days}} дн.</div>{{if .Has}}<div class="muted" style="font-size:13px;margin:6px 0">{{range $i, $h := .Has}}{{if $i}}, {{end}}{{$h}}{{end}}</div>{{end}}<button class="btn">{{if eq $.Payment "stub_auto"}}Оплатить (тест){{else}}Оставить заявку{{end}}</button></form>{{end}}</div>
 {{else}}<div class="card">Тарифы ещё не настроены.</div>{{end}}
 <p><a href="/cabinet">← В кабинет</a></p>
 {{template "foot" .}}{{end}}

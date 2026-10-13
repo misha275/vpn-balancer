@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -30,7 +31,8 @@ type Config struct {
 	SubRefresh    time.Duration `yaml:"sub_refresh"`
 	NodeGrace     time.Duration `yaml:"node_grace"`
 
-	PublicHost  string `yaml:"public_host"`
+	Domain      string `yaml:"domain"`      // main domain of the service: every address (links, subscriptions, site, WireGuard) is built from it, not from an IP
+	PublicHost  string `yaml:"public_host"` // legacy: the address in links; with domain set it is the domain
 	InboundPort int    `yaml:"inbound_port"`
 	Reality     struct {
 		PrivateKey      string `yaml:"private_key"`
@@ -103,21 +105,24 @@ type Config struct {
 	// --- subscription for users ---
 	GatewayName string `yaml:"gateway_name"`
 	// public site for users (registration, cabinet, payment stub); most of these can also be changed in the panel
-	SiteEnabled      bool   `yaml:"site_enabled"`
-	SiteDomain       string `yaml:"site_domain"`       // the domain of the site; a Let's Encrypt certificate is issued for it automatically
-	SiteEmail        string `yaml:"site_email"`        // contact for Let's Encrypt (expiry warnings)
-	SiteName         string `yaml:"site_name"`         // name shown on the site
-	SiteRegistration *bool  `yaml:"site_registration"` // may new people register (default true)
-	SiteTrialDays    *int   `yaml:"site_trial_days"`   // free days for a new account (default 3)
-	SitePayment      string `yaml:"site_payment"`      // manual (admin confirms) | stub_auto (test: paid at once) | off
-	SiteSupport      string `yaml:"site_support"`      // contact line shown in the cabinet
-	SiteACMEStaging  bool   `yaml:"site_acme_staging"` // test certificates of Let's Encrypt (not trusted by browsers, no rate limits)
-	SiteVia443       bool   `yaml:"site_via_reality"`  // serve the site on port 443 too: the gateway hands browsers over to it (Reality dest)
-	SiteHTTPListen   string `yaml:"site_http_listen"`  // port 80: certificate challenge and redirect to HTTPS (default :80)
-	SiteHTTPSListen  string `yaml:"site_https_listen"` // HTTPS of the site (default :8443; 443 is taken by the gateway)
-	SiteAllowHTTP    bool   `yaml:"site_allow_http"`   // without a domain: serve the site over plain HTTP (passwords are not encrypted!)
-	SiteDest         string `yaml:"site_dest"`         // address of the site's HTTPS port as the gateway sees it (default balancer:8443 with an external gateway)
-	siteReady        bool   // the certificate is issued and the site answers: the gateway may hand browsers over to it
+	SiteEnabled      bool      `yaml:"site_enabled"`
+	SiteDomain       string    `yaml:"site_domain"`       // the domain of the site; a Let's Encrypt certificate is issued for it automatically
+	SiteEmail        string    `yaml:"site_email"`        // contact for Let's Encrypt (expiry warnings)
+	SiteName         string    `yaml:"site_name"`         // name shown on the site
+	SiteRegistration *bool     `yaml:"site_registration"` // may new people register (default true)
+	SiteTrialDays    *int      `yaml:"site_trial_days"`   // free days for a new account (default 3)
+	SitePayment      string    `yaml:"site_payment"`      // manual (admin confirms) | stub_auto (test: paid at once) | off
+	SiteSupport      string    `yaml:"site_support"`      // contact line shown in the cabinet
+	SiteACMEStaging  bool      `yaml:"site_acme_staging"` // test certificates of Let's Encrypt (not trusted by browsers, no rate limits)
+	SiteVia443       bool      `yaml:"site_via_reality"`  // serve the site on port 443 too: the gateway hands browsers over to it (Reality dest)
+	SiteHTTPListen   string    `yaml:"site_http_listen"`  // port 80: certificate challenge and redirect to HTTPS (default :80)
+	SiteHTTPSListen  string    `yaml:"site_https_listen"` // HTTPS of the site (default :8443; 443 is taken by the gateway)
+	SiteAllowHTTP    bool      `yaml:"site_allow_http"`   // without a domain: serve the site over plain HTTP (passwords are not encrypted!)
+	UserDefaultSubs  []string  `yaml:"user_default_subs"` // subscriptions a user may take when nothing else is set (default: balancers, all)
+	UserDefaultDays  int       `yaml:"user_default_days"` // days of access for users created in the panel (0 = unlimited)
+	SiteDest         string    `yaml:"site_dest"`         // address of the site's HTTPS port as the gateway sees it (default balancer:8443 with an external gateway)
+	extVia           []ExtNode // external servers in the "via" mode that someone may use (set by PrepareGateway)
+	siteReady        bool      // the certificate is issued and the site answers: the gateway may hand browsers over to it
 
 	SubListen    string `yaml:"sub_listen"` // e.g. 0.0.0.0:8081; empty = subscription endpoint off
 	SubTLSCert   string `yaml:"sub_tls_cert"`
@@ -152,6 +157,21 @@ func LoadConfig(path string) (*Config, error) {
 		if *p == "" {
 			*p = v
 		}
+	}
+	c.Domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(c.Domain), "."))
+	if c.Domain != "" {
+		if !validDomain(c.Domain) {
+			return nil, fmt.Errorf("domain: %q is not a valid domain name", c.Domain)
+		}
+		if c.PublicHost != "" && c.PublicHost != c.Domain {
+			log.Printf("config: public_host %q is replaced by the domain %q (links are built from the domain)", c.PublicHost, c.Domain)
+		}
+		c.PublicHost = c.Domain
+		if c.SiteDomain == "" {
+			c.SiteDomain = c.Domain
+		}
+	} else if net.ParseIP(c.PublicHost) != nil {
+		log.Printf("config: public_host is an IP address; set domain: to build links from a domain name (they survive a change of the server's IP)")
 	}
 	defS(&c.SubUserAgent, "sing-box")
 	def(&c.SubRefresh, 30*time.Minute)
@@ -351,8 +371,11 @@ func subURL(cfg *Config, token string) string {
 // subURLKind is the address of one of the user's subscriptions: kind "all" (balancers + all servers) or "balancers".
 func subURLKind(cfg *Config, token, kind string) string {
 	s := subURL(cfg, token)
-	if s == "" || kind == "all" {
+	if s == "" {
 		return s
+	}
+	if strings.HasPrefix(kind, bundlePrefix) {
+		return s + "/b/" + kind[len(bundlePrefix):]
 	}
 	return s + "/" + kind
 }
@@ -534,6 +557,9 @@ func run(ctx context.Context, cfg *Config, st *Store) {
 	if err != nil {
 		log.Fatalf("users: %v", err)
 	}
+	if users, err = st.PrepareGateway(ctx, cfg, users); err != nil { // who may use the balancer / which external servers through this one
+		log.Fatalf("users: %v", err)
+	}
 	wgm := NewWGManager(cfg, st, core)
 	if err := wgm.Load(ctx); err != nil {
 		log.Printf("wireguard: %v", err)
@@ -580,6 +606,21 @@ func run(ctx context.Context, cfg *Config, st *Store) {
 		}
 	}()
 
+	// subscriptions of external servers: separate from the balancer pool, the same refresh period
+	go func() {
+		st.RefreshAllExtSources(ctx, cfg)
+		t := time.NewTicker(cfg.SubRefresh)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				st.RefreshAllExtSources(ctx, cfg)
+			}
+		}
+	}()
+
 	// reconcile DB (nodes, users) -> sing-box config
 	go func() {
 		t := time.NewTicker(30 * time.Second)
@@ -597,6 +638,10 @@ func run(ctx context.Context, cfg *Config, st *Store) {
 			us, err2 := st.EnabledUsers(ctx)
 			if err1 != nil || err2 != nil {
 				log.Printf("reconcile: db error: %v %v", err1, err2)
+				continue
+			}
+			if us, err2 = st.PrepareGateway(ctx, cfg, us); err2 != nil {
+				log.Printf("reconcile: users: %v", err2)
 				continue
 			}
 			act, applied, err := core.Apply(ns, us, chk.CurrentTag())

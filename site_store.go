@@ -32,18 +32,22 @@ type Account struct {
 	SubToken string
 	Expires  *time.Time
 	Enabled  bool
+
+	Subs     []string
+	PlanID   *int64
+	PlanSubs []string
 }
 
 // User returns the VPN user of the account (for building links).
 func (a *Account) User() User {
-	return User{ID: a.UserID, Name: a.UserName, UUID: a.UUID, Enabled: a.Enabled, SubToken: a.SubToken, Expires: a.Expires}
+	return User{ID: a.UserID, Name: a.UserName, UUID: a.UUID, Enabled: a.Enabled, SubToken: a.SubToken, Expires: a.Expires, Subs: a.Subs, PlanID: a.PlanID, PlanSubs: a.PlanSubs}
 }
 
-const accountCols = `a.id, a.email, a.pass_hash, a.user_id, a.blocked, a.note, a.created, a.last_login, u.name, u.uuid::text, u.sub_token, u.expires_at, u.enabled`
+const accountCols = `a.id, a.email, a.pass_hash, a.user_id, a.blocked, a.note, a.created, a.last_login, u.name, u.uuid::text, u.sub_token, u.expires_at, u.enabled, u.subs, u.plan_id, (SELECT p.subs FROM plans p WHERE p.id=u.plan_id)`
 
 func scanAccount(r pgx.Row) (*Account, error) {
 	var a Account
-	err := r.Scan(&a.ID, &a.Email, &a.PassHash, &a.UserID, &a.Blocked, &a.Note, &a.Created, &a.LastLogin, &a.UserName, &a.UUID, &a.SubToken, &a.Expires, &a.Enabled)
+	err := r.Scan(&a.ID, &a.Email, &a.PassHash, &a.UserID, &a.Blocked, &a.Note, &a.Created, &a.LastLogin, &a.UserName, &a.UUID, &a.SubToken, &a.Expires, &a.Enabled, &a.Subs, &a.PlanID, &a.PlanSubs)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -86,6 +90,10 @@ func (s *Store) CreateAccount(ctx context.Context, email, passHash string, trial
 
 func (s *Store) AccountByID(ctx context.Context, id int64) (*Account, error) {
 	return scanAccount(s.pool.QueryRow(ctx, `SELECT `+accountCols+` FROM accounts a JOIN users u ON u.id=a.user_id WHERE a.id=$1`, id))
+}
+
+func (s *Store) AccountByUserID(ctx context.Context, userID int64) (*Account, error) {
+	return scanAccount(s.pool.QueryRow(ctx, `SELECT `+accountCols+` FROM accounts a JOIN users u ON u.id=a.user_id WHERE a.user_id=$1`, userID))
 }
 
 func (s *Store) AccountByEmail(ctx context.Context, email string) (*Account, error) {
@@ -222,17 +230,18 @@ func (s *Store) PurgeSessions(ctx context.Context) {
 // ---- plans ----
 
 type Plan struct {
-	ID         int64  `json:"id"`
-	Name       string `json:"name"`
-	Days       int    `json:"days"`
-	PriceCents int    `json:"price_cents"`
-	Currency   string `json:"currency"`
-	Enabled    bool   `json:"enabled"`
-	Sort       int    `json:"sort"`
+	ID         int64    `json:"id"`
+	Name       string   `json:"name"`
+	Days       int      `json:"days"`
+	PriceCents int      `json:"price_cents"`
+	Currency   string   `json:"currency"`
+	Enabled    bool     `json:"enabled"`
+	Sort       int      `json:"sort"`
+	Subs       []string `json:"subs"` // subscriptions of the plan; null = the default list
 }
 
 func (s *Store) ListPlans(ctx context.Context, onlyEnabled bool) ([]Plan, error) {
-	q := `SELECT id,name,days,price_cents,currency,enabled,sort FROM plans`
+	q := `SELECT id,name,days,price_cents,currency,enabled,sort,subs FROM plans`
 	if onlyEnabled {
 		q += ` WHERE enabled`
 	}
@@ -244,7 +253,7 @@ func (s *Store) ListPlans(ctx context.Context, onlyEnabled bool) ([]Plan, error)
 	out := []Plan{}
 	for rows.Next() {
 		var p Plan
-		if err := rows.Scan(&p.ID, &p.Name, &p.Days, &p.PriceCents, &p.Currency, &p.Enabled, &p.Sort); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Days, &p.PriceCents, &p.Currency, &p.Enabled, &p.Sort, &p.Subs); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -254,8 +263,8 @@ func (s *Store) ListPlans(ctx context.Context, onlyEnabled bool) ([]Plan, error)
 
 func (s *Store) PlanByID(ctx context.Context, id int64) (*Plan, error) {
 	var p Plan
-	err := s.pool.QueryRow(ctx, `SELECT id,name,days,price_cents,currency,enabled,sort FROM plans WHERE id=$1`, id).
-		Scan(&p.ID, &p.Name, &p.Days, &p.PriceCents, &p.Currency, &p.Enabled, &p.Sort)
+	err := s.pool.QueryRow(ctx, `SELECT id,name,days,price_cents,currency,enabled,sort,subs FROM plans WHERE id=$1`, id).
+		Scan(&p.ID, &p.Name, &p.Days, &p.PriceCents, &p.Currency, &p.Enabled, &p.Sort, &p.Subs)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -267,6 +276,13 @@ func (p *Plan) validate() error {
 	p.Currency = strings.ToUpper(strings.TrimSpace(p.Currency))
 	if p.Currency == "" {
 		p.Currency = "RUB"
+	}
+	if p.Subs != nil {
+		keys, err := cleanSubKeys(p.Subs)
+		if err != nil {
+			return err
+		}
+		p.Subs = keys
 	}
 	switch {
 	case p.Name == "" || len([]rune(p.Name)) > 60:
@@ -287,12 +303,12 @@ func (s *Store) SavePlan(ctx context.Context, p Plan) (int64, error) {
 		return 0, err
 	}
 	if p.ID == 0 {
-		err := s.pool.QueryRow(ctx, `INSERT INTO plans(name,days,price_cents,currency,enabled,sort) VALUES($1,$2,$3,$4,$5,$6) RETURNING id`,
-			p.Name, p.Days, p.PriceCents, p.Currency, p.Enabled, p.Sort).Scan(&p.ID)
+		err := s.pool.QueryRow(ctx, `INSERT INTO plans(name,days,price_cents,currency,enabled,sort,subs) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+			p.Name, p.Days, p.PriceCents, p.Currency, p.Enabled, p.Sort, p.Subs).Scan(&p.ID)
 		return p.ID, err
 	}
-	tag, err := s.pool.Exec(ctx, `UPDATE plans SET name=$2,days=$3,price_cents=$4,currency=$5,enabled=$6,sort=$7 WHERE id=$1`,
-		p.ID, p.Name, p.Days, p.PriceCents, p.Currency, p.Enabled, p.Sort)
+	tag, err := s.pool.Exec(ctx, `UPDATE plans SET name=$2,days=$3,price_cents=$4,currency=$5,enabled=$6,sort=$7,subs=$8 WHERE id=$1`,
+		p.ID, p.Name, p.Days, p.PriceCents, p.Currency, p.Enabled, p.Sort, p.Subs)
 	if err == nil && tag.RowsAffected() == 0 {
 		return 0, ErrNotFound
 	}
@@ -360,8 +376,8 @@ func scanPayments(rows pgx.Rows) ([]Payment, error) {
 // CreatePayment records a pending payment for a plan (the plan is copied: later edits of the plan do not change it).
 func (s *Store) CreatePayment(ctx context.Context, accountID int64, plan Plan, provider string) (*Payment, error) {
 	var id int64
-	if err := s.pool.QueryRow(ctx, `INSERT INTO payments(account_id, plan_name, days, amount_cents, currency, provider) VALUES($1,$2,$3,$4,$5,$6) RETURNING id`,
-		accountID, plan.Name, plan.Days, plan.PriceCents, plan.Currency, provider).Scan(&id); err != nil {
+	if err := s.pool.QueryRow(ctx, `INSERT INTO payments(account_id, plan_name, days, amount_cents, currency, provider, plan_id) VALUES($1,$2,$3,$4,$5,$6,NULLIF($7::bigint,0)) RETURNING id`,
+		accountID, plan.Name, plan.Days, plan.PriceCents, plan.Currency, provider, plan.ID).Scan(&id); err != nil {
 		return nil, err
 	}
 	return s.PaymentByID(ctx, id)
@@ -401,7 +417,8 @@ func (s *Store) MarkPaid(ctx context.Context, id int64) (bool, error) {
 	defer tx.Rollback(ctx)
 	var accID int64
 	var days int
-	err = tx.QueryRow(ctx, `UPDATE payments SET status='paid', paid_at=now() WHERE id=$1 AND status='pending' RETURNING account_id, days`, id).Scan(&accID, &days)
+	var planID *int64
+	err = tx.QueryRow(ctx, `UPDATE payments SET status='paid', paid_at=now() WHERE id=$1 AND status='pending' RETURNING account_id, days, plan_id`, id).Scan(&accID, &days, &planID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -411,6 +428,12 @@ func (s *Store) MarkPaid(ctx context.Context, id int64) (bool, error) {
 	if _, err := tx.Exec(ctx, `UPDATE users SET expires_at = CASE WHEN expires_at IS NULL THEN NULL ELSE GREATEST(expires_at, now()) + make_interval(days => $2) END
 		WHERE id = (SELECT user_id FROM accounts WHERE id=$1)`, accID, days); err != nil {
 		return false, err
+	}
+	if planID != nil { // the subscriptions of the paid plan apply from now on (a deleted plan changes nothing)
+		if _, err := tx.Exec(ctx, `UPDATE users SET plan_id=COALESCE((SELECT id FROM plans WHERE id=$2), plan_id)
+			WHERE id = (SELECT user_id FROM accounts WHERE id=$1)`, accID, *planID); err != nil {
+			return false, err
+		}
 	}
 	return true, tx.Commit(ctx)
 }

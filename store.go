@@ -26,6 +26,23 @@ type User struct {
 	Enabled  bool
 	SubToken string
 	Expires  *time.Time // end of the subscription, nil = no limit
+
+	Subs     []string // own list of subscriptions (nil = by plan or default)
+	PlanID   *int64   // plan paid last
+	PlanSubs []string // subscriptions of that plan (nil = default)
+
+	// set by prepareUsers for the gateway (not stored)
+	NoBalancer bool    // may not use the balancers of the main server (only external servers through it)
+	Via        []int64 // external servers whose traffic goes through the gateway for this user
+
+	SubFetched *time.Time // last time the subscription was downloaded
+	SubFetches int64
+}
+
+const userCols = `id,name,uuid::text,enabled,sub_token,expires_at,subs,plan_id,(SELECT p.subs FROM plans p WHERE p.id=users.plan_id),sub_fetched,sub_fetches`
+
+func scanUser(r interface{ Scan(...any) error }, u *User) error {
+	return r.Scan(&u.ID, &u.Name, &u.UUID, &u.Enabled, &u.SubToken, &u.Expires, &u.Subs, &u.PlanID, &u.PlanSubs, &u.SubFetched, &u.SubFetches)
 }
 
 // Active reports whether the key may work now (enabled and the period has not ended).
@@ -134,7 +151,7 @@ func (s *Store) InsertChecks(ctx context.Context, cs []CheckRow) error {
 }
 
 func (s *Store) EnabledUsers(ctx context.Context) ([]User, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id,name,uuid::text,enabled,sub_token,expires_at FROM users WHERE enabled AND (expires_at IS NULL OR expires_at > now()) ORDER BY id`)
+	rows, err := s.pool.Query(ctx, `SELECT `+userCols+` FROM users WHERE enabled AND (expires_at IS NULL OR expires_at > now()) ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +159,7 @@ func (s *Store) EnabledUsers(ctx context.Context) ([]User, error) {
 	var out []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Name, &u.UUID, &u.Enabled, &u.SubToken, &u.Expires); err != nil {
+		if err := scanUser(rows, &u); err != nil {
 			return nil, err
 		}
 		out = append(out, u)
@@ -151,7 +168,7 @@ func (s *Store) EnabledUsers(ctx context.Context) ([]User, error) {
 }
 
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id,name,uuid::text,enabled,sub_token,expires_at FROM users ORDER BY id`)
+	rows, err := s.pool.Query(ctx, `SELECT `+userCols+` FROM users ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -159,7 +176,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	var out []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Name, &u.UUID, &u.Enabled, &u.SubToken, &u.Expires); err != nil {
+		if err := scanUser(rows, &u); err != nil {
 			return nil, err
 		}
 		out = append(out, u)
@@ -212,8 +229,8 @@ func (s *Store) SetExit(ctx context.Context, id, ip, country string) error {
 // UserBySubToken finds an enabled user by the secret in the subscription URL.
 func (s *Store) UserBySubToken(ctx context.Context, token string) (*User, error) {
 	var u User
-	err := s.pool.QueryRow(ctx, `SELECT id,name,uuid::text,enabled,sub_token,expires_at FROM users WHERE sub_token=$1 AND enabled AND (expires_at IS NULL OR expires_at > now())`, token).
-		Scan(&u.ID, &u.Name, &u.UUID, &u.Enabled, &u.SubToken, &u.Expires)
+	err := s.pool.QueryRow(ctx, `SELECT `+userCols+` FROM users WHERE sub_token=$1 AND enabled AND (expires_at IS NULL OR expires_at > now())`, token).
+		Scan(&u.ID, &u.Name, &u.UUID, &u.Enabled, &u.SubToken, &u.Expires, &u.Subs, &u.PlanID, &u.PlanSubs, &u.SubFetched, &u.SubFetches)
 	if err != nil {
 		return nil, err
 	}
