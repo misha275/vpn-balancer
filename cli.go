@@ -405,7 +405,8 @@ func runCLI(ctx context.Context, cfg *Config, st *Store, cmd string, args []stri
 		for _, u := range us {
 			if u.Name == args[0] {
 				if s := subURL(cfg, u.SubToken); s != "" {
-					fmt.Println(s)
+					fmt.Println(s) // balancers + all servers
+					fmt.Println(subURLKind(cfg, u.SubToken, "balancers"))
 					return true, nil
 				}
 				return true, fmt.Errorf("подписки выключены: задайте sub_listen и sub_public_url в config.yaml")

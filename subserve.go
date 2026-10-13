@@ -52,9 +52,13 @@ func relabel(n *Node, cfg *Config) (string, bool) {
 	return link + "#" + url.PathEscape(name), true
 }
 
+// RenderBalancers is the subscription "balancers only": one link per mode.
+func RenderBalancers(cfg *Config, u *User) []string { return modeLinks(cfg, *u) }
+
 // RenderSub builds the plain list of links for a user (before base64).
+// The balancers (current, best speed, best ping) come first, then all allowed servers.
 func RenderSub(cfg *Config, u *User, nodes []*Node) []string {
-	lines := []string{userLink(cfg, cfg.getGatewayName(), u.UUID)}
+	lines := RenderBalancers(cfg, u)
 	var ns []*Node
 	for _, n := range nodes {
 		if n.Allowed(cfg) {
@@ -113,37 +117,49 @@ func (s *SubServer) fail(ip string) {
 
 func (s *SubServer) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /sub/{token}", func(w http.ResponseWriter, r *http.Request) {
-		ip := clientIP(r)
-		if s.limited(ip) {
-			http.Error(w, "too many requests", http.StatusTooManyRequests)
-			return
+	serve := func(kind string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			ip := clientIP(r)
+			if s.limited(ip) {
+				http.Error(w, "too many requests", http.StatusTooManyRequests)
+				return
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+			defer cancel()
+			u, err := s.store.UserBySubToken(ctx, r.PathValue("token"))
+			if err != nil {
+				s.fail(ip)
+				http.NotFound(w, r) // same answer for wrong token and disabled user
+				return
+			}
+			var body string
+			title := s.cfg.getGatewayName()
+			if kind == "balancers" {
+				body = strings.Join(RenderBalancers(s.cfg, u), "\n")
+				title += " · балансировщики"
+			} else {
+				nodes, err := s.store.ActiveNodes(ctx, s.cfg.NodeGrace)
+				if err != nil {
+					log.Printf("sub: nodes: %v", err)
+					http.Error(w, "temporary error", http.StatusServiceUnavailable)
+					return
+				}
+				body = strings.Join(RenderSub(s.cfg, u, nodes), "\n")
+			}
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("profile-update-interval", "6")
+			w.Header().Set("profile-title", "base64:"+base64.StdEncoding.EncodeToString([]byte(title)))
+			if r.URL.Query().Get("raw") == "1" {
+				fmt.Fprint(w, body+"\n") // for humans: the same list without base64
+				return
+			}
+			fmt.Fprint(w, base64.StdEncoding.EncodeToString([]byte(body)))
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-		defer cancel()
-		u, err := s.store.UserBySubToken(ctx, r.PathValue("token"))
-		if err != nil {
-			s.fail(ip)
-			http.NotFound(w, r) // same answer for wrong token and disabled user
-			return
-		}
-		nodes, err := s.store.ActiveNodes(ctx, s.cfg.NodeGrace)
-		if err != nil {
-			log.Printf("sub: nodes: %v", err)
-			http.Error(w, "temporary error", http.StatusServiceUnavailable)
-			return
-		}
-		body := strings.Join(RenderSub(s.cfg, u, nodes), "\n")
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("profile-update-interval", "6")
-		w.Header().Set("profile-title", "base64:"+base64.StdEncoding.EncodeToString([]byte(s.cfg.getGatewayName())))
-		if r.URL.Query().Get("raw") == "1" {
-			fmt.Fprint(w, body+"\n") // for humans: the same list without base64
-			return
-		}
-		fmt.Fprint(w, base64.StdEncoding.EncodeToString([]byte(body)))
-	})
+	}
+	mux.HandleFunc("GET /sub/{token}", serve("all"))
+	mux.HandleFunc("GET /sub/{token}/all", serve("all"))
+	mux.HandleFunc("GET /sub/{token}/balancers", serve("balancers"))
 	return mux
 }
 

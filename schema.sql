@@ -100,3 +100,56 @@ CREATE TABLE IF NOT EXISTS wg_peers (
     enabled     BOOLEAN NOT NULL DEFAULT true,
     created     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- subscription period of a user (NULL = no limit); after this moment the key stops working
+ALTER TABLE users ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+
+-- public site: accounts of people who registered themselves (each one owns a VPN user), sessions, plans, payments
+CREATE TABLE IF NOT EXISTS accounts (
+    id         BIGSERIAL PRIMARY KEY,
+    email      TEXT NOT NULL UNIQUE,
+    pass_hash  TEXT NOT NULL,
+    user_id    BIGINT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    blocked    BOOLEAN NOT NULL DEFAULT false,
+    note       TEXT NOT NULL DEFAULT '',
+    created    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_login TIMESTAMPTZ
+);
+CREATE TABLE IF NOT EXISTS web_sessions (
+    token_hash TEXT PRIMARY KEY,
+    account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    created    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires    TIMESTAMPTZ NOT NULL,
+    ip         TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS web_sessions_account ON web_sessions (account_id);
+CREATE TABLE IF NOT EXISTS plans (
+    id          BIGSERIAL PRIMARY KEY,
+    name        TEXT NOT NULL,
+    days        INT NOT NULL CHECK (days > 0),
+    price_cents INT NOT NULL DEFAULT 0 CHECK (price_cents >= 0),
+    currency    TEXT NOT NULL DEFAULT 'RUB',
+    enabled     BOOLEAN NOT NULL DEFAULT true,
+    sort        INT NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS payments (
+    id           BIGSERIAL PRIMARY KEY,
+    account_id   BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    plan_name    TEXT NOT NULL,
+    days         INT NOT NULL,
+    amount_cents INT NOT NULL,
+    currency     TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'pending',   -- pending | paid | canceled
+    provider     TEXT NOT NULL DEFAULT '',
+    created      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    paid_at      TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS payments_account ON payments (account_id, created DESC);
+CREATE INDEX IF NOT EXISTS payments_status ON payments (status, created DESC);
+
+-- certificates of the site (Let's Encrypt) survive the recreation of the container
+CREATE TABLE IF NOT EXISTS acme_cache (
+    key     TEXT PRIMARY KEY,
+    data    BYTEA NOT NULL,
+    updated TIMESTAMPTZ NOT NULL DEFAULT now()
+);

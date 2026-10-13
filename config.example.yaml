@@ -18,9 +18,10 @@ reality:
   short_id: <openssl rand -hex 8>
   handshake_server: www.microsoft.com
   handshake_port: 443
-  # Отпечаток TLS в выдаваемых ссылках. "ios" надёжно работает с новыми клиентами Xray (v2rayNG, Hiddify);
-  # "chrome" у них шлёт постквантовое приветствие, которое sing-box 1.11 не распознаёт (REALITY: processed invalid connection).
-  fingerprint: ios
+  # Отпечаток TLS (рукопожатие) в выдаваемых ссылках. По умолчанию "firefox".
+  # Если какой-то клиент (v2rayNG, Hiddify) перестал подключаться, а в логе шлюза "REALITY: processed invalid connection",
+  # верните "ios": у новых клиентов Xray chrome/firefox шлют постквантовое приветствие, которое sing-box 1.11 может не распознать.
+  fingerprint: firefox
 
 # --- проверки ---
 tier1_interval: 1m         # TCP-доступность
@@ -80,3 +81,14 @@ http_listen: 0.0.0.0:8080  # внутри контейнера; наружу п�
 # wg_port: 51820
 # wg_network: 10.77.0.0/24        # адреса внутри туннеля
 # wg_endpoint: ""                 # IP/домен домашнего сервера, который увидит роутер (можно указать при выдаче скрипта)
+
+# Сайт для пользователей (регистрация, кабинет, оплата-заглушка). Обычно всё включается в панели, вкладка «Сайт»;
+# здесь только то, что в панели не меняется, и начальные значения.
+# site_enabled: false
+# site_domain: vpn.example.com      # A-запись должна указывать на сервер; сертификат Let's Encrypt выпускается автоматически
+# site_email: admin@example.com
+# site_payment: manual              # manual | stub_auto (тест, бесплатное продление!) | off
+# site_trial_days: 3
+# site_http_listen: ":80"           # проверка домена и переход на https
+# site_https_listen: ":8443"        # 443 занят шлюзом
+# site_via_reality: false           # сайт и на обычном 443 (браузеры -> сайт, клиенты с ключом -> VPN)

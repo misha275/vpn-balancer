@@ -81,6 +81,7 @@ type Config struct {
 	WGNetwork  string `yaml:"wg_network"`  // network inside the tunnel (default 10.77.0.0/24)
 	WGEndpoint string `yaml:"wg_endpoint"` // address the routers connect to (default public_host)
 	wgPeers    []WGPeer
+	modeDef    map[string]string // node tag each extra balancer mode starts on
 
 	// --- country policy ---
 	ExitCheck        *bool         `yaml:"exit_check"`             // measure where each node really exits (default: true)
@@ -100,7 +101,24 @@ type Config struct {
 	DefaultAction string    `yaml:"default_action"` // proxy (default) | block
 
 	// --- subscription for users ---
-	GatewayName  string `yaml:"gateway_name"`
+	GatewayName string `yaml:"gateway_name"`
+	// public site for users (registration, cabinet, payment stub); most of these can also be changed in the panel
+	SiteEnabled      bool   `yaml:"site_enabled"`
+	SiteDomain       string `yaml:"site_domain"`       // the domain of the site; a Let's Encrypt certificate is issued for it automatically
+	SiteEmail        string `yaml:"site_email"`        // contact for Let's Encrypt (expiry warnings)
+	SiteName         string `yaml:"site_name"`         // name shown on the site
+	SiteRegistration *bool  `yaml:"site_registration"` // may new people register (default true)
+	SiteTrialDays    *int   `yaml:"site_trial_days"`   // free days for a new account (default 3)
+	SitePayment      string `yaml:"site_payment"`      // manual (admin confirms) | stub_auto (test: paid at once) | off
+	SiteSupport      string `yaml:"site_support"`      // contact line shown in the cabinet
+	SiteACMEStaging  bool   `yaml:"site_acme_staging"` // test certificates of Let's Encrypt (not trusted by browsers, no rate limits)
+	SiteVia443       bool   `yaml:"site_via_reality"`  // serve the site on port 443 too: the gateway hands browsers over to it (Reality dest)
+	SiteHTTPListen   string `yaml:"site_http_listen"`  // port 80: certificate challenge and redirect to HTTPS (default :80)
+	SiteHTTPSListen  string `yaml:"site_https_listen"` // HTTPS of the site (default :8443; 443 is taken by the gateway)
+	SiteAllowHTTP    bool   `yaml:"site_allow_http"`   // without a domain: serve the site over plain HTTP (passwords are not encrypted!)
+	SiteDest         string `yaml:"site_dest"`         // address of the site's HTTPS port as the gateway sees it (default balancer:8443 with an external gateway)
+	siteReady        bool   // the certificate is issued and the site answers: the gateway may hand browsers over to it
+
 	SubListen    string `yaml:"sub_listen"` // e.g. 0.0.0.0:8081; empty = subscription endpoint off
 	SubTLSCert   string `yaml:"sub_tls_cert"`
 	SubTLSKey    string `yaml:"sub_tls_key"`
@@ -140,7 +158,7 @@ func LoadConfig(path string) (*Config, error) {
 	def(&c.NodeGrace, 48*time.Hour)
 	defI(&c.InboundPort, 443)
 	defI(&c.Reality.HandshakePort, 443)
-	defS(&c.Reality.Fingerprint, "ios")
+	defS(&c.Reality.Fingerprint, "firefox")
 	defS(&c.Reality.HandshakeServer, "www.microsoft.com")
 	defS(&c.SingboxBin, "sing-box")
 	defS(&c.WorkDir, "/var/lib/balancer")
@@ -169,6 +187,18 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	defS(&c.HTTPListen, "127.0.0.1:8080")
 	defS(&c.GatewayName, "Балансировщик")
+	defS(&c.SiteName, "VPN")
+	defS(&c.SitePayment, "manual")
+	defS(&c.SiteHTTPListen, ":80")
+	defS(&c.SiteHTTPSListen, ":8443")
+	if c.SiteRegistration == nil {
+		on := true
+		c.SiteRegistration = &on
+	}
+	if c.SiteTrialDays == nil {
+		d := 3
+		c.SiteTrialDays = &d
+	}
 	def(&c.GeoTTL, 6*time.Hour)
 	def(&c.GeoBlockedTTL, 30*time.Minute)
 	if p, err := netip.ParsePrefix(c.WGNetwork); err != nil || !p.Addr().Is4() || p.Bits() < 16 || p.Bits() > 29 {
@@ -302,23 +332,39 @@ func (n *Notifier) Notify(key, msg string, every time.Duration) {
 	}()
 }
 
+func frontSNI(cfg *Config) string { sni, _, _ := cfg.realityFront(); return sni }
+
 func userLink(cfg *Config, name, uuid string) string {
 	return fmt.Sprintf("vless://%s@%s:%d?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=%s&pbk=%s&sid=%s&type=tcp#%s",
-		uuid, cfg.PublicHost, cfg.InboundPort, cfg.Reality.HandshakeServer, cfg.Reality.Fingerprint, cfg.Reality.PublicKey, cfg.Reality.ShortID, url.PathEscape(name))
+		uuid, cfg.PublicHost, cfg.InboundPort, frontSNI(cfg), cfg.Reality.Fingerprint, cfg.Reality.PublicKey, cfg.Reality.ShortID, url.PathEscape(name))
 }
 
 // subURL is the address of the user's subscription ("" when the endpoint is not configured).
 func subURL(cfg *Config, token string) string {
-	if cfg.SubPublicURL == "" {
+	base := cfg.subBase()
+	if base == "" {
 		return ""
 	}
-	return strings.TrimRight(cfg.SubPublicURL, "/") + "/sub/" + token
+	return base + "/sub/" + token
+}
+
+// subURLKind is the address of one of the user's subscriptions: kind "all" (balancers + all servers) or "balancers".
+func subURLKind(cfg *Config, token, kind string) string {
+	s := subURL(cfg, token)
+	if s == "" || kind == "all" {
+		return s
+	}
+	return s + "/" + kind
 }
 
 func printUser(cfg *Config, u User) {
 	fmt.Printf("%-20s enabled=%-5v\n  gateway:      %s\n", u.Name, u.Enabled, userLink(cfg, cfg.getGatewayName(), u.UUID))
+	for _, m := range balModes {
+		fmt.Printf("  %-13s %s\n", modeTitle(m)+":", modeLink(cfg, u, m))
+	}
 	if s := subURL(cfg, u.SubToken); s != "" {
-		fmt.Printf("  subscription: %s\n", s)
+		fmt.Printf("  subscription: %s   (балансировщики + все серверы)\n", s)
+		fmt.Printf("  sub balancers: %s   (только балансировщики)\n", subURLKind(cfg, u.SubToken, "balancers"))
 	}
 }
 
@@ -398,6 +444,7 @@ func main() {
 				fmt.Println(userLink(cfg, cfg.getGatewayName(), u.UUID)) // first line stays the plain vless:// link
 				if s := subURL(cfg, u.SubToken); s != "" {
 					fmt.Println(s)
+					fmt.Println(subURLKind(cfg, u.SubToken, "balancers"))
 				}
 			}
 		}
@@ -482,6 +529,7 @@ func run(ctx context.Context, cfg *Config, st *Store) {
 			log.Fatalf("nodes: %v", err)
 		}
 	}
+	PreloadReady(ctx, cfg, st) // a certificate that is already in the database: the first gateway configuration shows the site right away
 	users, err := st.EnabledUsers(ctx)
 	if err != nil {
 		log.Fatalf("users: %v", err)
@@ -582,8 +630,12 @@ func run(ctx context.Context, cfg *Config, st *Store) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		chk.WriteMetrics(w)
 	})
+	site := NewSite(cfg, st)
+	siteSrv := NewSiteServer(cfg, st, site.Handler())
+	go siteSrv.Run(ctx)
+	go site.janitor(ctx)
 	api := NewAPI(cfg, st, chk, core, adminToken, refreshCh)
-	api.stats, api.logs = col, ctrlLogs
+	api.stats, api.logs, api.site = col, ctrlLogs, siteSrv
 	api.Register(mux)
 	log.Printf("panel: http://%s/ (token: `balancer token`)", cfg.HTTPListen)
 	srv := &http.Server{Addr: cfg.HTTPListen, Handler: mux, ReadHeaderTimeout: 5 * time.Second}

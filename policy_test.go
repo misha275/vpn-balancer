@@ -309,14 +309,20 @@ func TestRenderSub(t *testing.T) {
 	}
 	nodes := []*Node{mk("nl", "NL", "Netherlands"), mk("ru", "RU", "USA label"), mk("de", "DE", "Germany"), mk("unk", "", "Unknown"), {ID: "x" + strings.Repeat("0", 39), Name: "old", ExitCountry: "SE"}}
 	lines := RenderSub(cfg, &User{Name: "bob", UUID: testUUID}, nodes)
-	if len(lines) != 3 {
-		t.Fatalf("balancer + 2 allowed nodes with links expected, got %d: %v", len(lines), lines)
+	if len(lines) != 5 {
+		t.Fatalf("3 balancers + 2 allowed nodes with links expected, got %d: %v", len(lines), lines)
 	}
 	if !strings.HasPrefix(lines[0], "vless://"+testUUID+"@gw.example.com:443") || !strings.HasSuffix(lines[0], "#Balancer") {
 		t.Errorf("the balancer must be first: %s", lines[0])
 	}
-	if !strings.Contains(lines[1], "de.example.com") || !strings.HasSuffix(lines[1], "#%5BDE%5D%20Germany") {
-		t.Errorf("nodes follow, sorted by exit country, labelled with the measured exit: %s", lines[1])
+	if !strings.HasSuffix(lines[1], "#Balancer%20%C2%B7%20%D0%BB%D1%83%D1%87%D1%88%D0%B0%D1%8F%20%D1%81%D0%BA%D0%BE%D1%80%D0%BE%D1%81%D1%82%D1%8C") || strings.Contains(lines[1], testUUID) {
+		t.Errorf("the second balancer is the speed one with its own key: %s", lines[1])
+	}
+	if !strings.Contains(lines[3], "de.example.com") || !strings.HasSuffix(lines[3], "#%5BDE%5D%20Germany") {
+		t.Errorf("nodes follow, sorted by exit country, labelled with the measured exit: %s", lines[3])
+	}
+	if only := RenderBalancers(cfg, &User{Name: "bob", UUID: testUUID}); len(only) != 3 || only[0] != lines[0] || only[1] != lines[1] || only[2] != lines[2] {
+		t.Errorf("the balancers-only subscription is the first three lines: %v", only)
 	}
 	for _, l := range lines {
 		if strings.Contains(l, "ru.example.com") || strings.Contains(l, "unk.example.com") {

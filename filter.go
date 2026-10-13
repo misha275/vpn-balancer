@@ -167,6 +167,12 @@ func portEntry(entry, raw string) (string, string, error) {
 // without it (no node is allowed to carry traffic) "proxy" rules become "reject",
 // so traffic can never leak out of the server itself.
 func CompileRules(rules []RuleCfg, hasProxy bool) ([]any, error) {
+	return compileRules(rules, hasProxy, "proxy", nil)
+}
+
+// compileRules renders the rules; proxyTag is the selector "proxy" rules lead to, authUsers (if not nil) restricts
+// the rules to the connections of these sing-box users (one balancer mode).
+func compileRules(rules []RuleCfg, hasProxy bool, proxyTag string, authUsers []string) ([]any, error) {
 	var out []any
 	for i, r := range rules {
 		act := strings.ToLower(strings.TrimSpace(r.Action))
@@ -204,11 +210,14 @@ func CompileRules(rules []RuleCfg, hasProxy bool) ([]any, error) {
 				return
 			}
 			rule := map[string]any{"inbound": []string{"vless-in"}, key: vals}
+			if authUsers != nil {
+				rule["auth_user"] = authUsers
+			}
 			switch {
 			case act == "direct":
 				rule["outbound"] = "direct"
 			case act == "proxy" && hasProxy:
-				rule["outbound"] = "proxy"
+				rule["outbound"] = proxyTag
 			default:
 				rule["action"] = "reject"
 			}
@@ -226,11 +235,14 @@ func CompileRules(rules []RuleCfg, hasProxy bool) ([]any, error) {
 				ports = append(ports, n)
 			}
 			rule := map[string]any{"inbound": []string{"vless-in"}, "port": ports}
+			if authUsers != nil {
+				rule["auth_user"] = authUsers
+			}
 			switch {
 			case act == "direct":
 				rule["outbound"] = "direct"
 			case act == "proxy" && hasProxy:
-				rule["outbound"] = "proxy"
+				rule["outbound"] = proxyTag
 			default:
 				rule["action"] = "reject"
 			}

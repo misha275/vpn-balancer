@@ -25,6 +25,12 @@ type User struct {
 	UUID     string
 	Enabled  bool
 	SubToken string
+	Expires  *time.Time // end of the subscription, nil = no limit
+}
+
+// Active reports whether the key may work now (enabled and the period has not ended).
+func (u User) Active(now time.Time) bool {
+	return u.Enabled && (u.Expires == nil || u.Expires.After(now))
 }
 
 type CheckRow struct {
@@ -61,7 +67,11 @@ func NewStore(ctx context.Context, url string) (*Store, error) {
 	if _, err := pool.Exec(ctx, schemaSQL); err != nil {
 		return nil, err
 	}
-	return &Store{pool}, nil
+	st := &Store{pool}
+	if err := st.seedPlans(ctx); err != nil {
+		return nil, err
+	}
+	return st, nil
 }
 
 func (s *Store) UpsertNodes(ctx context.Context, nodes []*Node, source string) error {
@@ -124,7 +134,7 @@ func (s *Store) InsertChecks(ctx context.Context, cs []CheckRow) error {
 }
 
 func (s *Store) EnabledUsers(ctx context.Context) ([]User, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id,name,uuid::text,enabled,sub_token FROM users WHERE enabled ORDER BY id`)
+	rows, err := s.pool.Query(ctx, `SELECT id,name,uuid::text,enabled,sub_token,expires_at FROM users WHERE enabled AND (expires_at IS NULL OR expires_at > now()) ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +142,7 @@ func (s *Store) EnabledUsers(ctx context.Context) ([]User, error) {
 	var out []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Name, &u.UUID, &u.Enabled, &u.SubToken); err != nil {
+		if err := rows.Scan(&u.ID, &u.Name, &u.UUID, &u.Enabled, &u.SubToken, &u.Expires); err != nil {
 			return nil, err
 		}
 		out = append(out, u)
@@ -141,7 +151,7 @@ func (s *Store) EnabledUsers(ctx context.Context) ([]User, error) {
 }
 
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id,name,uuid::text,enabled,sub_token FROM users ORDER BY id`)
+	rows, err := s.pool.Query(ctx, `SELECT id,name,uuid::text,enabled,sub_token,expires_at FROM users ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +159,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	var out []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Name, &u.UUID, &u.Enabled, &u.SubToken); err != nil {
+		if err := rows.Scan(&u.ID, &u.Name, &u.UUID, &u.Enabled, &u.SubToken, &u.Expires); err != nil {
 			return nil, err
 		}
 		out = append(out, u)
@@ -158,6 +168,9 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 }
 
 func (s *Store) AddUser(ctx context.Context, name string) (string, error) {
+	if strings.Contains(name, "~") {
+		return "", errors.New("the name must not contain ~ (it separates the balancer mode: name~speed)")
+	}
 	var id string
 	err := s.pool.QueryRow(ctx, `INSERT INTO users(name) VALUES($1) RETURNING uuid::text`, name).Scan(&id)
 	return id, err
@@ -177,7 +190,7 @@ func (s *Store) LogSwitch(ctx context.Context, from, to, reason string) {
 
 func (s *Store) LastSelected(ctx context.Context) string {
 	var id string
-	if err := s.pool.QueryRow(ctx, `SELECT to_node FROM switches ORDER BY ts DESC LIMIT 1`).Scan(&id); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT to_node FROM switches WHERE reason NOT LIKE 'speed:%' AND reason NOT LIKE 'ping:%' ORDER BY ts DESC LIMIT 1`).Scan(&id); err != nil {
 		return ""
 	}
 	return id
@@ -199,8 +212,8 @@ func (s *Store) SetExit(ctx context.Context, id, ip, country string) error {
 // UserBySubToken finds an enabled user by the secret in the subscription URL.
 func (s *Store) UserBySubToken(ctx context.Context, token string) (*User, error) {
 	var u User
-	err := s.pool.QueryRow(ctx, `SELECT id,name,uuid::text,enabled,sub_token FROM users WHERE sub_token=$1 AND enabled`, token).
-		Scan(&u.ID, &u.Name, &u.UUID, &u.Enabled, &u.SubToken)
+	err := s.pool.QueryRow(ctx, `SELECT id,name,uuid::text,enabled,sub_token,expires_at FROM users WHERE sub_token=$1 AND enabled AND (expires_at IS NULL OR expires_at > now())`, token).
+		Scan(&u.ID, &u.Name, &u.UUID, &u.Enabled, &u.SubToken, &u.Expires)
 	if err != nil {
 		return nil, err
 	}

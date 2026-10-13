@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	qrcode "github.com/skip2/go-qrcode"
 	"log"
 	"net/http"
 	"strconv"
@@ -30,6 +31,7 @@ type API struct {
 	refresh chan struct{}
 	stats   *Collector
 	logs    *LogRing
+	site    *SiteServer
 
 	mu    sync.Mutex
 	fails map[string][]time.Time
@@ -100,6 +102,8 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/settings", a.auth(a.putSettings))
 	mux.HandleFunc("DELETE /api/settings/{key}", a.auth(a.resetSetting))
 	mux.HandleFunc("GET /api/users", a.auth(a.users))
+	mux.HandleFunc("GET /api/qr", a.auth(a.qr))
+	a.registerSite(mux)
 	mux.HandleFunc("POST /api/users", a.auth(a.addUser))
 	mux.HandleFunc("POST /api/users/{name}/{op}", a.auth(a.userOp))
 	mux.HandleFunc("DELETE /api/users/{name}", a.auth(a.delUser))
@@ -210,10 +214,61 @@ func (a *API) kick() {
 }
 
 type userView struct {
-	Name         string `json:"name"`
-	Enabled      bool   `json:"enabled"`
-	Gateway      string `json:"gateway"`
-	Subscription string `json:"subscription"`
+	Name         string     `json:"name"`
+	Enabled      bool       `json:"enabled"`
+	Gateway      string     `json:"gateway"`      // the main balancer link
+	Subscription string     `json:"subscription"` // balancers + all servers
+	Modes        []linkView `json:"modes"`        // the three balancers: current, best speed, best ping
+	Subs         []linkView `json:"subs"`         // the two subscriptions
+	Expires      int64      `json:"expires"`      // end of the subscription, unix seconds, 0 = no limit
+	Account      bool       `json:"account"`      // registered on the site (managed in the "Сайт" tab)
+}
+
+// linkView is a link with its title (the panel shows a QR code for each).
+type linkView struct {
+	Kind  string `json:"kind"`
+	Title string `json:"title"`
+	Link  string `json:"link"`
+}
+
+func newUserView(cfg *Config, u User) userView {
+	v := userView{Name: u.Name, Enabled: u.Enabled, Gateway: userLink(cfg, cfg.getGatewayName(), u.UUID), Subscription: subURL(cfg, u.SubToken)}
+	if u.Expires != nil {
+		v.Expires = u.Expires.Unix()
+	}
+	for _, m := range allModes {
+		k := m
+		if k == "" {
+			k = "current"
+		}
+		v.Modes = append(v.Modes, linkView{k, "Балансировщик: " + modeTitle(m), modeLink(cfg, u, m)})
+	}
+	if v.Subscription != "" {
+		v.Subs = []linkView{
+			{"balancers", "Подписка: только балансировщики", subURLKind(cfg, u.SubToken, "balancers")},
+			{"all", "Подписка: балансировщики + все серверы", subURLKind(cfg, u.SubToken, "all")},
+		}
+	} else {
+		v.Subs = []linkView{}
+	}
+	return v
+}
+
+// qr draws a QR code (PNG) of the given text. The panel asks for the links of the user, so it needs the token like everything else.
+func (a *API) qr(w http.ResponseWriter, r *http.Request) {
+	d := r.URL.Query().Get("d")
+	if d == "" || len(d) > 1800 {
+		apiErr(w, 400, fmt.Errorf("нужен текст до 1800 символов"))
+		return
+	}
+	png, err := qrcode.Encode(d, qrcode.Medium, 320)
+	if err != nil {
+		apiErr(w, 500, err)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Write(png)
 }
 
 func (a *API) users(w http.ResponseWriter, r *http.Request) {
@@ -224,7 +279,7 @@ func (a *API) users(w http.ResponseWriter, r *http.Request) {
 	}
 	out := []userView{}
 	for _, u := range us {
-		out = append(out, userView{u.Name, u.Enabled, userLink(a.cfg, a.cfg.getGatewayName(), u.UUID), subURL(a.cfg, u.SubToken)})
+		out = append(out, newUserView(a.cfg, u))
 	}
 	writeJSON(w, 200, out)
 }
@@ -235,6 +290,10 @@ func (a *API) addUser(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&in); err != nil || strings.TrimSpace(in.Name) == "" || len(in.Name) > 64 {
 		apiErr(w, 400, fmt.Errorf("нужно имя пользователя (до 64 символов)"))
+		return
+	}
+	if strings.ContainsAny(in.Name, "~") {
+		apiErr(w, 400, fmt.Errorf("в имени нельзя символ ~ (он нужен для режимов балансировщика)"))
 		return
 	}
 	if _, err := a.store.AddUser(r.Context(), strings.TrimSpace(in.Name)); err != nil {

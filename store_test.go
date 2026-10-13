@@ -25,7 +25,7 @@ func testStore(t *testing.T) *Store {
 		t.Fatal(err)
 	}
 	for _, tbl := range []string{"users", "nodes", "checks", "switches", "traffic_hourly", "user_seen", "metrics"} {
-		if _, err := st.pool.Exec(ctx, "TRUNCATE "+tbl); err != nil {
+		if _, err := st.pool.Exec(ctx, "TRUNCATE "+tbl+" CASCADE"); err != nil {
 			t.Fatal(err)
 		}
 	}

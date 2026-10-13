@@ -83,6 +83,22 @@ func (c *Config) getWGPeers() []WGPeer {
 	return append([]WGPeer(nil), c.wgPeers...)
 }
 
+// modeDefault is the node a mode selector starts on after a reload (the checker keeps it up to date).
+func (c *Config) getModeDefault(mode string) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.modeDef[mode]
+}
+
+func (c *Config) setModeDefault(mode, tag string) {
+	c.mu.Lock()
+	if c.modeDef == nil {
+		c.modeDef = map[string]string{}
+	}
+	c.modeDef[mode] = tag
+	c.mu.Unlock()
+}
+
 func (c *Config) setWGPeers(p []WGPeer) {
 	c.mu.Lock()
 	c.wgPeers = p

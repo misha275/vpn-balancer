@@ -49,7 +49,7 @@ func TestUIDemo(t *testing.T) {
 	ago := func(d time.Duration) int64 { return now.Add(-d).Unix() }
 	nodes := []NodeView{
 		{Tag: "n-a", Name: "🇩🇪 Frankfurt 1", Server: "de1.example.com", Type: "vless", Score: 91.5, LatencyMS: 82, SuccessRate: 1, SpeedKbps: 54000, SpeedAt: ago(40 * time.Minute), SpeedTry: ago(40 * time.Minute), CheckAt: ago(2 * time.Minute),
-			SpeedHist: []SpeedPoint{{K: 48000, T: ago(13 * time.Hour)}, {K: 54000, T: ago(40 * time.Minute)}}, Current: true, ExitCountry: "DE", ExitIP: "1.2.3.4", Allowed: true,
+			SpeedHist: []SpeedPoint{{K: 48000, T: ago(13 * time.Hour)}, {K: 54000, T: ago(40 * time.Minute)}}, Current: true, Modes: []string{"speed"}, ExitCountry: "DE", ExitIP: "1.2.3.4", Allowed: true,
 			Services: map[string]SvcRes{"telegram": {OK: true, MS: 120, T: ago(5 * time.Minute)}, "youtube": {OK: true, MS: 210, T: ago(5 * time.Minute)}, "x": {OK: true, MS: 300, T: ago(5 * time.Minute)}}},
 		{Tag: "n-b", Name: "🇳🇱 Amsterdam slow", Server: "nl1.example.com", Type: "trojan", Score: 80, LatencyMS: 60, SuccessRate: 1, SpeedKbps: 3200, SpeedAt: ago(26 * time.Hour), SpeedTry: ago(3 * time.Hour), SpeedErr: "short download: 120 bytes", CheckAt: ago(1 * time.Minute),
 			Quality: "slow", ExitCountry: "NL", ExitIP: "5.6.7.8", Allowed: true, Services: map[string]SvcRes{"telegram": {OK: true, MS: 100, T: ago(30 * time.Minute)}}},
@@ -57,7 +57,7 @@ func TestUIDemo(t *testing.T) {
 			Services: map[string]SvcRes{"telegram": {OK: false, T: ago(10 * time.Minute), Fails: 2, Err: "tcp://149.154.167.51:443: closed right after connect: EOF"}, "youtube": {OK: true, MS: 300, T: ago(10 * time.Minute)}}},
 	}
 	outer.HandleFunc("GET /api/overview", a.auth(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"snapshot": map[string]any{"nodes": nodes}, "switches": []any{}, "ready": true})
+		writeJSON(w, 200, map[string]any{"snapshot": map[string]any{"nodes": nodes, "modes": []ModeView{{"", "текущий", "🇩🇪 Frankfurt 1", ""}, {"speed", "лучшая скорость", "🇩🇪 Frankfurt 1", ""}, {"ping", "лучший пинг", "🇳🇱 Amsterdam slow", ""}}}, "switches": []any{}, "ready": true})
 	}))
 	outer.HandleFunc("GET /api/wg", a.auth(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, wgView{Port: 51820, Network: "10.77.0.0/24", ServerIP: "10.77.0.1", ServerKey: "uXk3w0nQ9bJt1Zr7mC5dYh2LpA8sVfEoG4iTqNcRb1M=", Running: true,
@@ -69,10 +69,15 @@ func TestUIDemo(t *testing.T) {
 		fmt.Fprint(w, "/interface wireguard add name=wg-vpn listen-port=0 mtu=1380 private-key=\"...\"\n/interface wireguard peers add ...\n")
 	}))
 	outer.HandleFunc("GET /api/users", a.auth(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, []userView{{"admin", true, "vless://x", "https://sub/x"}, {"alice", true, "vless://y", ""}})
+		mk := func(name string) userView {
+			cfg := testCfg()
+			cfg.SubPublicURL = "https://sub.example.com"
+			return newUserView(cfg, User{Name: name, UUID: testUUID, Enabled: true, SubToken: "tok" + name})
+		}
+		writeJSON(w, 200, []userView{mk("admin"), mk("alice")})
 	}))
 	outer.HandleFunc("DELETE /api/users/{name}", a.auth(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, []userView{{"admin", true, "vless://x", "https://sub/x"}})
+		writeJSON(w, 200, []userView{})
 	}))
 	outer.HandleFunc("GET /api/settings", a.auth(func(w http.ResponseWriter, r *http.Request) {
 		p := t.TempDir() + "/c.yaml"

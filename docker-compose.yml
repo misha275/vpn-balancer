@@ -46,6 +46,8 @@ services:
         condition: service_started
     ports:
       - "127.0.0.1:8080:8080"
+      - "80:80"           # сайт: выдача сертификата Let's Encrypt (HTTP-01) и переход на https (включается в панели, вкладка «Сайт»)
+      - "8443:8443"       # сайт по HTTPS (443 занят шлюзом; при site_via_reality браузеры попадают на сайт через 443)
       # - "8081:8081"     # выдача подписок пользователям (включите sub_listen в config.yaml)
     volumes:
       - ./config.yaml:/etc/balancer/config.yaml:ro

@@ -39,7 +39,8 @@ type SessInfo struct {
 	Since time.Time `json:"since"`
 	Up    int64     `json:"up"`
 	Down  int64     `json:"down"`
-	Idle  int       `json:"idle_sec"` // seconds since the last byte
+	Idle  int       `json:"idle_sec"`       // seconds since the last byte
+	Mode  string    `json:"mode,omitempty"` // balancer mode of the connection: "" (current), "speed", "ping"
 }
 
 type InvalidInfo struct {
@@ -78,6 +79,7 @@ type session struct {
 	up, down       atomic.Int64
 	last           atomic.Int64 // unix nano
 	user           string       // guarded by tracker.mu
+	mode           string       // balancer mode, guarded by tracker.mu
 	invalid        bool
 	closed         bool
 	counted        bool
@@ -165,7 +167,7 @@ func (t *tracker) account(s *session, final bool) {
 func (t *tracker) setUser(slot, port int, name string) {
 	t.mu.Lock()
 	if s := t.live[sessKey{slot, port}]; s != nil {
-		s.user = name
+		s.user, s.mode = foldUser(name) // "alice~speed" is alice using the speed balancer
 	}
 	t.mu.Unlock()
 }
@@ -240,7 +242,7 @@ func (t *tracker) drain() GWStats {
 		}
 		st.Conns++
 		if len(st.Sessions) < 1000 {
-			st.Sessions = append(st.Sessions, SessInfo{ID: s.id, User: s.user, IP: s.ip, Since: s.start,
+			st.Sessions = append(st.Sessions, SessInfo{ID: s.id, User: s.user, Mode: s.mode, IP: s.ip, Since: s.start,
 				Up: s.up.Load(), Down: s.down.Load(), Idle: int(now.Sub(time.Unix(0, s.last.Load())).Seconds())})
 		}
 	}
@@ -368,7 +370,7 @@ func (l *lineSink) line(s string) {
 		if len(l.idUser) > 20000 || l.idUser == nil {
 			l.idUser = map[string]string{}
 		}
-		l.idUser[m[1]] = m[2]
+		l.idUser[m[1]], _ = foldUser(m[2])
 		if p, ok := l.idPort[m[1]]; ok {
 			l.t.setUser(l.slot, p, m[2])
 			delete(l.idPort, m[1])

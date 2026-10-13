@@ -246,7 +246,7 @@ func tightens(oldRules, newRules []RuleCfg, oldDef, newDef string) bool {
 // the new config next to the old one (see gateway.go). They are cut early (urgent) only when the change
 // withdraws something: a user, the node they are using, or a new block rule.
 func (c *Core) Apply(nodes []*Node, users []User, def string) (active []*Node, applied bool, err error) {
-	fp := fingerprint(nodes, users) + "|" + c.policySig(nodes) + "|wg:" + c.cfg.wgSig()
+	fp := fingerprint(nodes, users) + "|" + c.policySig(nodes) + "|wg:" + c.cfg.wgSig() + "|modes:1|front:" + cfg0front(c.cfg)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if fp == c.applied {
@@ -482,13 +482,18 @@ func (c *Core) WaitReady(ctx context.Context, d time.Duration) bool {
 	return false
 }
 
-func (c *Core) Select(tag string) error {
-	_, err := c.api("PUT", "/proxies/proxy", map[string]string{"name": tag})
+func (c *Core) Select(tag string) error { return c.SelectMode("", tag) }
+
+// SelectMode moves the selector of a balancer mode ("" = the main one).
+func (c *Core) SelectMode(mode, tag string) error {
+	_, err := c.api("PUT", "/proxies/"+modeTag(mode), map[string]string{"name": tag})
 	return err
 }
 
-func (c *Core) Selected() (string, error) {
-	data, err := c.api("GET", "/proxies/proxy", nil)
+func (c *Core) Selected() (string, error) { return c.SelectedMode("") }
+
+func (c *Core) SelectedMode(mode string) (string, error) {
+	data, err := c.api("GET", "/proxies/"+modeTag(mode), nil)
 	if err != nil {
 		return "", err
 	}
@@ -541,6 +546,16 @@ func BuildConfig(cfg *Config, nodes []*Node, users []User, def string) ([]byte, 
 		// flows from the home network arrive as plain IP connections; reading the site name from them (TLS/HTTP) lets domain rules apply
 		rules = append(rules, map[string]any{"inbound": []string{"wg-in"}, "action": "sniff"})
 	}
+	// the extra balancer modes get their own copy of the rules (first match wins, so they go before the common ones)
+	if len(users) > 0 && hasProxy {
+		for _, m := range balModes {
+			mr, err := compileRules(cfg.getRules(), hasProxy, modeTag(m), modeUsers(users, m))
+			if err != nil {
+				return nil, err
+			}
+			rules = append(rules, mr...)
+		}
+	}
 	rules = append(rules, userRules...)
 	final := "direct" // only reachable by inbounds we do not create; user traffic never ends here
 	if !hasProxy || defaultAction == "block" {
@@ -562,27 +577,46 @@ func BuildConfig(cfg *Config, nodes []*Node, users []User, def string) ([]byte, 
 			}
 		}
 		outbounds = append(outbounds, map[string]any{"type": "selector", "tag": "proxy", "outbounds": tags, "default": d})
+		for _, m := range balModes {
+			dm := d
+			if want := cfg.getModeDefault(m); want != "" {
+				for _, t := range tags {
+					if t == want {
+						dm = want
+					}
+				}
+			}
+			outbounds = append(outbounds, map[string]any{"type": "selector", "tag": modeTag(m), "outbounds": tags, "default": dm})
+		}
 		if defaultAction != "block" {
 			final = "proxy"
+			if len(users) > 0 {
+				for _, m := range balModes {
+					rules = append(rules, map[string]any{"inbound": []string{"vless-in"}, "auth_user": modeUsers(users, m), "outbound": modeTag(m)})
+				}
+			}
 		}
 	}
 	outbounds = append(outbounds, map[string]any{"type": "direct", "tag": "direct"})
 
 	inbounds := []any{}
+	frontSNI, frontHost, frontPort := cfg.realityFront()
 	if len(users) > 0 {
 		var vu []any
 		for _, u := range users {
-			vu = append(vu, map[string]any{"name": u.Name, "uuid": u.UUID, "flow": "xtls-rprx-vision"})
+			for _, m := range allModes {
+				vu = append(vu, map[string]any{"name": modeUser(u.Name, m), "uuid": modeUUID(u.UUID, m), "flow": "xtls-rprx-vision"})
+			}
 		}
 		inbounds = append(inbounds, map[string]any{
 			"type": "vless", "tag": "vless-in", "listen": "::", "listen_port": cfg.InboundPort,
 			"users": vu,
 			"tls": map[string]any{
 				"enabled":     true,
-				"server_name": cfg.Reality.HandshakeServer,
+				"server_name": frontSNI,
 				"reality": map[string]any{
 					"enabled":     true,
-					"handshake":   map[string]any{"server": cfg.Reality.HandshakeServer, "server_port": cfg.Reality.HandshakePort},
+					"handshake":   map[string]any{"server": frontHost, "server_port": frontPort},
 					"private_key": cfg.Reality.PrivateKey,
 					"short_id":    []string{cfg.Reality.ShortID},
 				},
@@ -612,4 +646,10 @@ func BuildConfig(cfg *Config, nodes []*Node, users []User, def string) ([]byte, 
 		"experimental": map[string]any{"clash_api": map[string]any{"external_controller": cfg.ClashAPI}},
 	}
 	return json.MarshalIndent(conf, "", "  ")
+}
+
+// cfg0front is the part of the fingerprint that tells which site the gateway shows.
+func cfg0front(cfg *Config) string {
+	sni, host, port := cfg.realityFront()
+	return fmt.Sprintf("%s>%s:%d", sni, host, port)
 }

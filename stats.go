@@ -103,6 +103,7 @@ func (c *Collector) Sample(ctx context.Context, keep bool) {
 		c.speed = map[string]UserDelta{}
 	} else {
 		c.gwErr = ""
+		foldGW(&gs) // a gateway older than the controller reports "alice~speed" as a separate user
 		dt := now.Sub(c.prevTot.at).Seconds()
 		if c.prevTot.ok && c.prevTot.epoch == gs.Epoch && dt > 0.5 {
 			s.Up = float64(gs.UpTotal-c.prevTot.up) / dt

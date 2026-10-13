@@ -133,10 +133,15 @@ type Checker struct {
 	watchFails int // only touched by the watchdog goroutine
 
 	pinned string // node ID chosen by the operator; used while it is healthy and allowed
+
+	modeCur  map[string]string // extra balancer modes: node ID each one is on
+	modeCand map[string]string
+	modeCnt  map[string]int
 }
 
 func NewChecker(cfg *Config, st *Store, core *Core, n *Notifier) *Checker {
-	return &Checker{cfg: cfg, store: st, core: core, notify: n, states: map[string]*NodeState{}, bOK: true}
+	return &Checker{cfg: cfg, store: st, core: core, notify: n, states: map[string]*NodeState{}, bOK: true,
+		modeCur: map[string]string{}, modeCand: map[string]string{}, modeCnt: map[string]int{}}
 }
 
 func (c *Checker) SyncNodes(nodes []*Node) {
@@ -698,9 +703,23 @@ func (c *Checker) decideLocked(cycle bool) (target *Node, reason string, none bo
 }
 
 func (c *Checker) evaluate(cycle bool) {
+	c.adoptModes()
 	c.mu.Lock()
 	target, reason, none := c.decideLocked(cycle)
+	type pick struct {
+		mode, reason string
+		n            *Node
+	}
+	var picks []pick
+	for _, m := range balModes {
+		if n, r := c.decideModeLocked(m, cycle); n != nil {
+			picks = append(picks, pick{m, r, n})
+		}
+	}
 	c.mu.Unlock()
+	for _, p := range picks {
+		c.switchMode(p.mode, p.n, p.reason)
+	}
 	if none && c.baselineOK() {
 		c.notify.Notify("alldown", "🔴 Нет допустимых узлов: все недоступны или выходят в запрещённых странах", 15*time.Minute)
 	}
@@ -747,6 +766,17 @@ func (c *Checker) reconcileSelector() {
 	if now, err := c.core.Selected(); err == nil && now != st.Node.Tag() {
 		_ = c.core.Select(st.Node.Tag())
 	}
+	for _, m := range balModes {
+		c.mu.RLock()
+		ms := c.states[c.modeCur[m]]
+		c.mu.RUnlock()
+		if ms == nil {
+			continue
+		}
+		if now, err := c.core.SelectedMode(m); err == nil && now != ms.Node.Tag() {
+			_ = c.core.SelectMode(m, ms.Node.Tag())
+		}
+	}
 }
 
 type NodeView struct {
@@ -768,6 +798,7 @@ type NodeView struct {
 	Quality     string            `json:"quality"` // "" = fine, "slow", "service:NAME"
 	Quarantined bool              `json:"quarantined"`
 	Current     bool              `json:"current"`
+	Modes       []string          `json:"modes"` // extra balancer modes that use this node now ("speed", "ping")
 	Pinned      bool              `json:"pinned"`
 	ExitCountry string            `json:"exit_country"`
 	ExitIP      string            `json:"exit_ip"`
@@ -780,6 +811,15 @@ type Snapshot struct {
 	Current  string     `json:"current"` // name of the node users are on right now
 	Pinned   string     `json:"pinned"`  // name of the node pinned by the operator ("" = automatic)
 	Nodes    []NodeView `json:"nodes"`
+	Modes    []ModeView `json:"modes"` // the balancers: current, best speed, best ping
+}
+
+// ModeView is the node a balancer mode sends users through right now.
+type ModeView struct {
+	Mode  string `json:"mode"` // "" (current), "speed", "ping"
+	Title string `json:"title"`
+	Node  string `json:"node"`
+	Tag   string `json:"tag"`
 }
 
 func (c *Checker) Snapshot() Snapshot {
@@ -795,13 +835,24 @@ func (c *Checker) Snapshot() Snapshot {
 	if st := c.states[c.pinned]; st != nil {
 		s.Pinned = st.Node.Name
 	}
+	for _, m := range allModes {
+		id := c.current
+		if m != "" {
+			id = c.modeCur[m]
+		}
+		mv := ModeView{Mode: m, Title: modeTitle(m)}
+		if st := c.states[id]; st != nil {
+			mv.Node, mv.Tag = st.Node.Name, st.Node.Tag()
+		}
+		s.Modes = append(s.Modes, mv)
+	}
 	for id, st := range c.states {
 		s.Nodes = append(s.Nodes, NodeView{
 			Tag: st.Node.Tag(), Name: st.Node.Name, Server: st.Node.Server, Type: st.Node.Type,
 			Score: st.score, LatencyMS: st.ewma, SuccessRate: st.sr, JitterMS: st.jitter,
 			SpeedKbps: st.speedKbps, SpeedHist: append([]SpeedPoint(nil), st.speedHist...), SpeedErr: st.speedErr,
 			SpeedAt: unixOrZero(st.speedAt()), SpeedTry: unixOrZero(st.speedTry), CheckAt: unixOrZero(st.checkAt), Services: copySvc(st.svc),
-			Quality: c.qualityIssue(st, time.Now(), c.cfg.getMinSpeed(), c.cfg.getRequired()), Current: id == c.current, Pinned: id == c.pinned,
+			Quality: c.qualityIssue(st, time.Now(), c.cfg.getMinSpeed(), c.cfg.getRequired()), Current: id == c.current, Modes: c.modesOn(id), Pinned: id == c.pinned,
 			Quarantined: time.Now().Before(st.quarantine) || (st.Node.ExitCountry != "" && c.cfg.exitCheckOn() && c.cfg.isBlocked(st.Node.ExitCountry)),
 			ExitCountry: st.Node.ExitCountry, ExitIP: st.Node.ExitIP, Allowed: st.Node.Allowed(c.cfg),
 		})
@@ -906,4 +957,15 @@ func (c *Checker) ForceGeo(ctx context.Context) {
 	}
 	c.mu.Unlock()
 	go c.geoPass(context.Background())
+}
+
+// modesOn lists the extra modes that are on the node (c.mu is held).
+func (c *Checker) modesOn(id string) []string {
+	var out []string
+	for _, m := range balModes {
+		if c.modeCur[m] == id {
+			out = append(out, m)
+		}
+	}
+	return out
 }
