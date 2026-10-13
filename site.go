@@ -515,42 +515,10 @@ func (s *Site) linkBase(r *http.Request) string {
 	return scheme + "://" + r.Host
 }
 
-// accountLinks are the links of the cabinet: the subscriptions the account may take (and, with the balancer among them, its three
-// balancer links). Own nodes never appear as links: they are only inside the bundle subscriptions.
+// accountLinks is the one link of the cabinet: the subscription address. It holds everything the account may take (the categories
+// chosen in the panel), so there is nothing else to copy. Servers never appear as separate links.
 func (s *Site) accountLinks(r *http.Request, a *Account) []linkItem {
-	base := s.linkBase(r)
-	u := a.User()
-	keys, _ := effectiveSubs(s.cfg, u)
-	names := map[string]string{}
-	ix, ixErr := s.st.LoadSubIndex(r.Context())
-	if ixErr == nil {
-		for k, b := range ix.Bundles {
-			names[k] = b.Name
-		}
-	}
-	out := []linkItem{}
-	for _, k := range keys {
-		switch {
-		case k == subBalancers:
-			out = append(out, linkItem{"sub-balancers", "Подписка: только балансировщики", base + "/sub/" + a.SubToken + "/balancers"})
-		case k == subAll:
-			out = append(out, linkItem{"sub-all", "Подписка: балансировщики и все серверы", base + "/sub/" + a.SubToken + "/all"})
-		default:
-			if n, ok := names[k]; ok { // a deleted or switched-off bundle is not offered
-				out = append(out, linkItem{"sub-b-" + k[len(bundlePrefix):], "Подписка: " + n, base + "/sub/" + a.SubToken + "/b/" + k[len(bundlePrefix):]})
-			}
-		}
-	}
-	if main := ixErr == nil && func() bool { m, _ := ix.access(s.cfg, u); return m }(); main {
-		for _, m := range allModes {
-			k := m
-			if k == "" {
-				k = "current"
-			}
-			out = append(out, linkItem{k, "Балансировщик: " + modeTitle(m), modeLink(s.cfg, u, m)})
-		}
-	}
-	return out
+	return []linkItem{{"sub", "Ваша подписка", s.linkBase(r) + "/sub/" + a.SubToken}}
 }
 
 // cabinetData collects what the cabinet shows.

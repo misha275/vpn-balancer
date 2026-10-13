@@ -258,8 +258,7 @@ func TestSiteRegistrationCabinetAndTraffic(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("cabinet: %d", code)
 	}
-	for _, want := range []string{"anna@example.com", "Активна", "осталось 3 дня", "5.00 МБ", "↑ 1.00 МБ", "↓ 4.00 МБ", "/sub/" + acc.SubToken + "/balancers", "/sub/" + acc.SubToken + "/all\"",
-		modeUUID(acc.UUID, modeSpeed)} {
+	for _, want := range []string{"anna@example.com", "Активна", "осталось 3 дня", "5.00 МБ", "↑ 1.00 МБ", "↓ 4.00 МБ", "/sub/" + acc.SubToken + "\""} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the cabinet must show %q", want)
 		}
@@ -271,7 +270,7 @@ func TestSiteRegistrationCabinetAndTraffic(t *testing.T) {
 		t.Error("csrf token")
 	}
 	// QR codes: only of the own links
-	for _, kind := range []string{"sub-all", "sub-balancers", "current", "speed", "ping"} {
+	for _, kind := range []string{"sub"} {
 		code, body, h := c.get("/qr/" + kind)
 		if code != 200 || h.Get("Content-Type") != "image/png" || !strings.HasPrefix(body, "\x89PNG") {
 			t.Errorf("qr %s: %d %s", kind, code, h.Get("Content-Type"))
@@ -281,7 +280,7 @@ func TestSiteRegistrationCabinetAndTraffic(t *testing.T) {
 		t.Errorf("unknown qr kind: %d", code)
 	}
 	anon := newSiteClient(t, srv)
-	if code, _, _ := anon.get("/qr/sub-all"); code != 401 {
+	if code, _, _ := anon.get("/qr/sub"); code != 401 {
 		t.Errorf("qr without a login: %d", code)
 	}
 	// the subscription works for the active user and carries the three balancers

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -477,4 +478,57 @@ func (s *Store) AcmePut(ctx context.Context, key string, data []byte) error {
 func (s *Store) AcmeDelete(ctx context.Context, key string) error {
 	_, err := s.pool.Exec(ctx, `DELETE FROM acme_cache WHERE key=$1`, key)
 	return err
+}
+
+// BulkPlanSubs changes the subscription list of every plan at once: "set" gives all of them exactly keys, "add" and "remove"
+// change the lists they have (a plan without its own list starts from base, the default list). With resetUsers the personal lists
+// of users are dropped, so everybody follows the plan (or the default) again.
+func (s *Store) BulkPlanSubs(ctx context.Context, mode string, keys, base []string, resetUsers bool) (plans int, users int64, err error) {
+	if mode != "set" && mode != "add" && mode != "remove" {
+		return 0, 0, fmt.Errorf("режим: set, add или remove")
+	}
+	ps, err := s.ListPlans(ctx, false)
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, p := range ps {
+		cur := p.Subs
+		if cur == nil {
+			cur = base
+		}
+		var next []string
+		switch mode {
+		case "set":
+			next = append(next, keys...)
+		case "add":
+			next = append(next, cur...)
+			for _, k := range keys {
+				if !hasSub(next, k) {
+					next = append(next, k)
+				}
+			}
+		case "remove":
+			for _, k := range cur {
+				if !hasSub(keys, k) {
+					next = append(next, k)
+				}
+			}
+		}
+		if next == nil {
+			next = []string{}
+		}
+		p.Subs = next
+		if _, err := s.SavePlan(ctx, p); err != nil {
+			return plans, 0, err
+		}
+		plans++
+	}
+	if resetUsers {
+		tag, err := s.pool.Exec(ctx, `UPDATE users SET subs=NULL WHERE subs IS NOT NULL`)
+		if err != nil {
+			return plans, 0, err
+		}
+		users = tag.RowsAffected()
+	}
+	return plans, users, nil
 }

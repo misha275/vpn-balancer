@@ -140,9 +140,7 @@ func (s *Store) DeleteExtSource(ctx context.Context, id int64) error {
 const maxSourceNodes = 2000
 
 func linkUniq(link string) string {
-	if i := strings.Index(link, "#"); i >= 0 && !strings.HasPrefix(link, "vmess://") {
-		link = link[:i]
-	}
+	// the whole link, the name included: providers often give many servers that differ only in the name (one entry, many exits)
 	h := sha1.Sum([]byte(link))
 	return hex.EncodeToString(h[:])
 }
@@ -185,6 +183,14 @@ func (s *Store) ImportSource(ctx context.Context, id int64, body string, grace t
 		}
 	}
 	br.Close()
+	// rows made by an older version (the key ignored the name) are replaced by the new ones
+	var links []string
+	for _, n := range nodes {
+		links = append(links, n.Link)
+	}
+	if _, err := s.pool.Exec(ctx, `DELETE FROM custom_nodes WHERE source_id=$1 AND last_seen < now() - interval '1 minute' AND link = ANY($2)`, id, links); err != nil {
+		return 0, err
+	}
 	if _, err := s.pool.Exec(ctx, `DELETE FROM custom_nodes WHERE source_id=$1 AND last_seen < $2`, id, time.Now().Add(-grace)); err != nil {
 		return 0, err
 	}

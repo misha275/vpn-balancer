@@ -23,6 +23,7 @@ func (a *API) registerSite(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/plans", a.auth(a.planSave))
 	mux.HandleFunc("PUT /api/plans/{id}", a.auth(a.planSave))
 	mux.HandleFunc("DELETE /api/plans/{id}", a.auth(a.planDelete))
+	mux.HandleFunc("POST /api/plans/bulk-subs", a.auth(a.plansBulkSubs))
 	mux.HandleFunc("GET /api/accounts", a.auth(a.accountsList))
 	mux.HandleFunc("POST /api/accounts", a.auth(a.accountCreate))
 	mux.HandleFunc("POST /api/accounts/{id}/{op}", a.auth(a.accountOp))
@@ -115,6 +116,35 @@ func (a *API) planSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.plansList(w, r)
+}
+
+// plansBulkSubs changes the subscriptions of all plans at once: {"mode":"set|add|remove","subs":[...],"reset_users":false}.
+func (a *API) plansBulkSubs(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Mode       string   `json:"mode"`
+		Subs       []string `json:"subs"`
+		ResetUsers bool     `json:"reset_users"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192)).Decode(&in); err != nil {
+		apiErr(w, 400, fmt.Errorf("ожидается JSON {mode, subs, reset_users}"))
+		return
+	}
+	keys, err := cleanSubKeys(in.Subs)
+	if err != nil {
+		apiErr(w, 400, err)
+		return
+	}
+	if len(keys) == 0 {
+		apiErr(w, 400, fmt.Errorf("выберите хотя бы одну подписку"))
+		return
+	}
+	np, nu, err := a.store.BulkPlanSubs(r.Context(), in.Mode, keys, a.cfg.defaultSubs(), in.ResetUsers)
+	if err != nil {
+		apiErr(w, 400, err)
+		return
+	}
+	ps, _ := a.store.ListPlans(r.Context(), false)
+	writeJSON(w, 200, map[string]any{"plans": ps, "changed_plans": np, "reset_users": nu})
 }
 
 func (a *API) planDelete(w http.ResponseWriter, r *http.Request) {

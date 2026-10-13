@@ -326,3 +326,72 @@ func TestExternalViaRoutesInSingbox(t *testing.T) {
 		t.Errorf("the filter must also block port 25 through an external server: %q", got)
 	}
 }
+
+// One entry, many exits: links that differ only in the name are all kept.
+func TestSourceKeepsLinksThatDifferOnlyInName(t *testing.T) {
+	st, _ := subsStore(t)
+	ctx := context.Background()
+	st.pool.Exec(ctx, "TRUNCATE ext_sources CASCADE")
+	sid, err := st.SaveExtSource(ctx, extSourceInput{Name: "alv", URL: "https://s.example/t", Mode: "direct"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := ""
+	for _, n := range []string{"DE", "NL", "FI", "US", "JP", "PL", "SE"} {
+		body += strings.Replace(extLinkA, "#A", "#"+n, 1) + "\n"
+	}
+	if n, err := st.ImportSource(ctx, sid, body, time.Hour); err != nil || n != 7 {
+		t.Fatalf("import: %d %v", n, err)
+	}
+	if n, err := st.ImportSource(ctx, sid, body, time.Hour); err != nil || n != 7 {
+		t.Fatalf("again: %d %v", n, err)
+	}
+	srcs, _ := st.ListExtSources(ctx)
+	if len(srcs) != 1 || srcs[0].Nodes != 7 {
+		t.Fatalf("all exits must stay: %+v", srcs)
+	}
+}
+
+func TestBulkPlanSubs(t *testing.T) {
+	st, _ := subsStore(t)
+	ctx := context.Background()
+	st.pool.Exec(ctx, "DELETE FROM plans")
+	a, _ := st.SavePlan(ctx, Plan{Name: "A", Days: 30, Enabled: true, Subs: []string{"balancers"}})
+	b, _ := st.SavePlan(ctx, Plan{Name: "B", Days: 30, Enabled: true}) // follows the default
+	_, _ = a, b
+	u := extUsers(t, st, "carl")["carl"]
+	st.SetUserSubs(ctx, "carl", []string{"all"})
+	get := func() map[string][]string {
+		ps, _ := st.ListPlans(ctx, false)
+		m := map[string][]string{}
+		for _, p := range ps {
+			m[p.Name] = p.Subs
+		}
+		return m
+	}
+	if _, _, err := st.BulkPlanSubs(ctx, "bad", nil, nil, false); err == nil {
+		t.Error("bad mode")
+	}
+	n, _, err := st.BulkPlanSubs(ctx, "add", []string{"b:vip"}, []string{"balancers"}, false)
+	if err != nil || n != 2 {
+		t.Fatal(n, err)
+	}
+	m := get()
+	if strings.Join(m["A"], ",") != "balancers,b:vip" || strings.Join(m["B"], ",") != "balancers,b:vip" {
+		t.Fatalf("add: %v", m)
+	}
+	st.BulkPlanSubs(ctx, "remove", []string{"balancers"}, nil, false)
+	if m = get(); strings.Join(m["A"], ",") != "b:vip" {
+		t.Fatalf("remove: %v", m)
+	}
+	_, nu, err := st.BulkPlanSubs(ctx, "set", []string{"b:games"}, nil, true)
+	if err != nil || nu < 1 {
+		t.Fatalf("set: %d %v", nu, err)
+	}
+	if m = get(); strings.Join(m["A"], ",") != "b:games" || strings.Join(m["B"], ",") != "b:games" {
+		t.Fatalf("set: %v", m)
+	}
+	if got, _ := st.UserBySubToken(ctx, u.SubToken); got.Subs != nil {
+		t.Errorf("personal list must be reset: %v", got.Subs)
+	}
+}
