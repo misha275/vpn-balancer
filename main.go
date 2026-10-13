@@ -58,25 +58,29 @@ type Config struct {
 	DrainTimeout  time.Duration `yaml:"drain_timeout"`  // how long old connections may live on after a new config went live
 	DrainUrgent   time.Duration `yaml:"drain_urgent"`   // same, when the change withdraws something (user, block rule)
 
-	ProbeURLs        []string      `yaml:"probe_urls"`
-	SpeedURL         string        `yaml:"speed_url"`
-	BaselineAddrs    []string      `yaml:"baseline_addrs"`
-	Tier1Interval    time.Duration `yaml:"tier1_interval"`
-	Tier2Interval    time.Duration `yaml:"tier2_interval"`
-	Tier3Interval    time.Duration `yaml:"tier3_interval"`
-	WatchInterval    time.Duration `yaml:"watch_interval"`
-	Tier3Top         int           `yaml:"tier3_top"`
-	Tier2Concurrency int           `yaml:"tier2_concurrency"`
-	MinSpeedKbps     *int          `yaml:"min_speed_kbps"`    // nodes slower than this are not chosen (default 8000 = 8 Mbit/s, 0 = off)
-	RequiredServices []string      `yaml:"required_services"` // services that must open through a node (default telegram)
-	Services         []string      `yaml:"services"`          // "name = address, address" lines; default list in quality.go
-	SpeedTTL         time.Duration `yaml:"speed_ttl"`         // a speed measurement is repeated after this time
-	ServiceInterval  time.Duration `yaml:"service_interval"`  // how often all nodes are checked against the services
-	SwitchMargin     float64       `yaml:"switch_margin"`
-	SwitchConfirm    int           `yaml:"switch_confirm"`
-	TelegramToken    string        `yaml:"telegram_token"`
-	TelegramChat     string        `yaml:"telegram_chat"`
-	HTTPListen       string        `yaml:"http_listen"`
+	ProbeURLs         []string      `yaml:"probe_urls"`
+	SpeedURL          string        `yaml:"speed_url"`
+	BaselineAddrs     []string      `yaml:"baseline_addrs"`
+	Tier1Interval     time.Duration `yaml:"tier1_interval"`
+	Tier2Interval     time.Duration `yaml:"tier2_interval"`
+	Tier3Interval     time.Duration `yaml:"tier3_interval"`
+	WatchInterval     time.Duration `yaml:"watch_interval"`
+	Tier3Top          int           `yaml:"tier3_top"`
+	Tier2Concurrency  int           `yaml:"tier2_concurrency"`
+	MinSpeedKbps      *int          `yaml:"min_speed_kbps"`    // nodes slower than this are not chosen (default 8000 = 8 Mbit/s, 0 = off)
+	RequiredServices  []string      `yaml:"required_services"` // services that must open through a node (default telegram)
+	Services          []string      `yaml:"services"`          // "name = address, address" lines; default list in quality.go
+	SpeedTTL          time.Duration `yaml:"speed_ttl"`         // a speed measurement is repeated after this time
+	ServiceInterval   time.Duration `yaml:"service_interval"`  // how often all nodes are checked against the services
+	SwitchMargin      float64       `yaml:"switch_margin"`
+	SwitchConfirm     int           `yaml:"switch_confirm"`
+	CloudflareToken   string        `yaml:"cloudflare_token"`   // keeps the A record of the domain on the public IP of the server (ddns.go)
+	CloudflareProxied bool          `yaml:"cloudflare_proxied"` // orange cloud: must stay off for VPN names
+	DDNSNames         []string      `yaml:"ddns_names"`         // default: the domain
+	DDNSInterval      time.Duration `yaml:"ddns_interval"`
+	TelegramToken     string        `yaml:"telegram_token"`
+	TelegramChat      string        `yaml:"telegram_chat"`
+	HTTPListen        string        `yaml:"http_listen"`
 
 	// --- WireGuard for routers (see wireguard.go) ---
 	WGPort     int    `yaml:"wg_port"`     // UDP port of the tunnel (default 51820)
@@ -173,6 +177,7 @@ func LoadConfig(path string) (*Config, error) {
 	} else if net.ParseIP(c.PublicHost) != nil {
 		log.Printf("config: public_host is an IP address; set domain: to build links from a domain name (they survive a change of the server's IP)")
 	}
+	def(&c.DDNSInterval, 5*time.Minute)
 	defS(&c.SubUserAgent, "sing-box")
 	def(&c.SubRefresh, 30*time.Minute)
 	def(&c.NodeGrace, 48*time.Hour)
@@ -587,6 +592,7 @@ func run(ctx context.Context, cfg *Config, st *Store) {
 	go core.Run(ctx)
 	go chk.Run(ctx)
 	go wgm.Reconcile(ctx)
+	go NewDDNS(cfg, notify).Run(ctx)
 
 	go func() {
 		if len(nodes) > 0 {

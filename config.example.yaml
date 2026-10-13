@@ -98,3 +98,8 @@ http_listen: 0.0.0.0:8080  # внутри контейнера; наружу п�
 # Ключи: balancers, all, b:<адрес сборки своих узлов>. У тарифа и у пользователя может быть свой список.
 # user_default_subs: [balancers]   # по умолчанию только 3 балансировщика; ещё: all, b:<категория>
 # user_default_days: 0
+
+# Автообновление DNS-записи в Cloudflare (запись должна быть "DNS only", серое облако)
+# cloudflare_token: ""        # токен с правами Zone:Read и DNS:Edit
+# ddns_names: []              # какие имена обновлять (по умолчанию domain)
+# ddns_interval: 5m

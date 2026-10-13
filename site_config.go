@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -87,7 +88,19 @@ func (c *Config) siteBaseURL() string {
 // subBase is the address links to subscriptions start with: the explicit sub_public_url, else the site.
 func (c *Config) subBase() string {
 	if c.SubPublicURL != "" {
-		return strings.TrimRight(c.SubPublicURL, "/")
+		u := strings.TrimRight(c.SubPublicURL, "/")
+		// an address with an IP (older installers wrote it) is replaced by the domain
+		if c.Domain != "" {
+			if pu, err := url.Parse(u); err == nil && net.ParseIP(pu.Hostname()) != nil {
+				if p := pu.Port(); p != "" {
+					pu.Host = c.Domain + ":" + p
+				} else {
+					pu.Host = c.Domain
+				}
+				return pu.String()
+			}
+		}
+		return u
 	}
 	return c.siteBaseURL()
 }
