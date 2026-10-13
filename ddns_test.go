@@ -93,3 +93,18 @@ func TestSubBaseIgnoresIP(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+func TestSubBasePrefersHTTPSOfTheSite(t *testing.T) {
+	c := &Config{Domain: "nvrk.ytc-srv.org", SubPublicURL: "http://203.0.113.5:8081", SiteEnabled: true, SiteDomain: "nvrk.ytc-srv.org", SiteHTTPSListen: ":8443"}
+	if got := c.subBase(); got != "http://nvrk.ytc-srv.org:8081" {
+		t.Errorf("no certificate yet: %q", got)
+	}
+	c.setSiteReady(true)
+	if got := c.subBase(); !strings.HasPrefix(got, "https://nvrk.ytc-srv.org") {
+		t.Errorf("with a certificate subscriptions go over https: %q", got)
+	}
+	c.SubPublicURL = "https://sub.example.com"
+	if got := c.subBase(); got != "https://sub.example.com" {
+		t.Errorf("an explicit https address stays: %q", got)
+	}
+}

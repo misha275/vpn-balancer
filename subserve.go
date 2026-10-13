@@ -240,7 +240,15 @@ func (s *SubServer) Serve(ctx context.Context) {
 	if s.cfg.SubTLSCert != "" && s.cfg.SubTLSKey != "" {
 		err = srv.ListenAndServeTLS(s.cfg.SubTLSCert, s.cfg.SubTLSKey)
 	} else {
-		log.Printf("sub: serving subscriptions over plain HTTP on %s: tokens and links are visible on the network; set sub_tls_cert/sub_tls_key or put a TLS proxy in front", s.cfg.SubListen)
+		log.Printf("sub: plain HTTP on %s only redirects to the HTTPS site once it has a certificate (older links keep working); until then tokens are visible on the network", s.cfg.SubListen)
+		inner := srv.Handler
+		srv.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if b := s.cfg.siteBaseURL(); b != "" && s.cfg.getSiteReady() {
+				http.Redirect(w, r, b+r.URL.RequestURI(), http.StatusPermanentRedirect)
+				return
+			}
+			inner.ServeHTTP(w, r)
+		})
 		err = srv.ListenAndServe()
 	}
 	if err != nil && err != http.ErrServerClosed {

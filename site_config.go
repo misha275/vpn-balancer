@@ -87,6 +87,10 @@ func (c *Config) siteBaseURL() string {
 
 // subBase is the address links to subscriptions start with: the explicit sub_public_url, else the site.
 func (c *Config) subBase() string {
+	// the site has a certificate: subscriptions are given over HTTPS from the site, not over the plain-HTTP listener
+	if b := c.siteBaseURL(); b != "" && c.getSiteReady() && (c.SubPublicURL == "" || strings.HasPrefix(c.SubPublicURL, "http://")) {
+		return b
+	}
 	if c.SubPublicURL != "" {
 		u := strings.TrimRight(c.SubPublicURL, "/")
 		// an address with an IP (older installers wrote it) is replaced by the domain
