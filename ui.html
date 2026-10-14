@@ -257,7 +257,7 @@ function vSettings(){
   const minSpeed=h("input",{type:"number",min:"0",step:"1",value:Math.round((V.min_speed_kbps||0)/1000)});
   const reqSvc=h("input",{value:(V.required_services||[]).join(", "),placeholder:"telegram, youtube"});
   const svcs=h("textarea",{style:"min-height:200px;font-family:monospace;font-size:12px"},(V.services||[]).join("\n"));
-  let rules=V.rules.map(r=>({action:r.action,match:(r.match||[]).join("\n")}));
+  let rules=V.rules.map(r=>({action:r.action||r.Action||"direct",match:(r.match||r.Match||[]).join("\n")}));
   const rulesBox=h("div",{});
   const drawRules=()=>rulesBox.replaceChildren(...rules.map((r,i)=>h("div",{class:"rule"},
     h("div",{class:"row"},

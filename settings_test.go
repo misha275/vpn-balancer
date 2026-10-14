@@ -204,3 +204,21 @@ func TestParseCLIValue(t *testing.T) {
 		}
 	}
 }
+
+// The panel reads the rules from the settings API: the keys must be lowercase, or saving the filter section sends an empty action.
+func TestRulesSettingsUseLowercaseKeys(t *testing.T) {
+	c := &Config{Rules: []RuleCfg{{Action: "direct", Match: []string{"*.ru"}}}}
+	var def settingDef
+	for _, d := range settingDefs {
+		if d.key == "rules" {
+			def = d
+		}
+	}
+	b, _ := json.Marshal(def.get(c))
+	if string(b) != `[{"action":"direct","match":["*.ru"]}]` {
+		t.Fatalf("%s", b)
+	}
+	if _, err := def.parse(json.RawMessage(`[{"Action":"block","Match":["port:25"]}]`)); err != nil {
+		t.Errorf("rules saved by older versions (capitalised keys) must still load: %v", err)
+	}
+}

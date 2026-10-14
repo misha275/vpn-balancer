@@ -17,9 +17,9 @@ import (
 // Rules are evaluated top to bottom, the first match wins. Traffic that matches
 // no rule goes through the balancer ("proxy"), unless default_action says otherwise.
 type RuleCfg struct {
-	Action  string   `yaml:"action"`
-	Match   []string `yaml:"match"`
-	Comment string   `yaml:"comment"`
+	Action  string   `yaml:"action" json:"action"`
+	Match   []string `yaml:"match" json:"match"`
+	Comment string   `yaml:"comment" json:"comment,omitempty"`
 }
 
 var domainOK = regexp.MustCompile(`^[a-z0-9_]([a-z0-9_.-]*[a-z0-9_])?$`)
