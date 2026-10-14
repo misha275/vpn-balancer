@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Balancer modes. One gateway, one port: every user has three keys (UUIDs), one per mode, and each mode has its own
@@ -15,13 +16,24 @@ import (
 const (
 	modeSpeed = "speed"
 	modePing  = "ping"
+	// modeSpread spreads the traffic: the selector is moved to the node that has carried the least traffic lately.
+	// The mode always exists inside the gateway; its links are shown to people only when spread_mode is on.
+	modeSpread = "spread"
 )
 
 // balModes are the extra modes (the main one is the empty string).
-var balModes = []string{modeSpeed, modePing}
+var balModes = []string{modeSpeed, modePing, modeSpread}
 
 // allModes lists every mode in the order they appear in links and the panel.
-var allModes = []string{"", modeSpeed, modePing}
+var allModes = []string{"", modeSpeed, modePing, modeSpread}
+
+// linkModes are the modes people see (links, subscriptions, panel): "spread" only when it is switched on.
+func linkModes(cfg *Config) []string {
+	if cfg.spreadOn() {
+		return allModes
+	}
+	return allModes[:3]
+}
 
 func modeTitle(mode string) string {
 	switch mode {
@@ -29,6 +41,8 @@ func modeTitle(mode string) string {
 		return "лучшая скорость"
 	case modePing:
 		return "лучший пинг"
+	case modeSpread:
+		return "по трафику"
 	}
 	return "текущий"
 }
@@ -100,7 +114,7 @@ func modeLink(cfg *Config, u User, mode string) string {
 // modeLinks are the links of all modes of a user, main first.
 func modeLinks(cfg *Config, u User) []string {
 	out := make([]string, 0, len(allModes))
-	for _, m := range allModes {
+	for _, m := range linkModes(cfg) {
 		out = append(out, modeLink(cfg, u, m))
 	}
 	return out
@@ -116,6 +130,21 @@ func modeUsers(users []User, mode string) []string {
 		out = append(out, modeUser(u.Name, mode))
 	}
 	return out
+}
+
+func (c *Config) spreadOn() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.SpreadMode != nil && *c.SpreadMode
+}
+
+func (c *Config) getSpreadInterval() time.Duration {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.SpreadInterval < 10*time.Second {
+		return 60 * time.Second
+	}
+	return c.SpreadInterval
 }
 
 // foldGW merges the per-mode user names of a statistics report into the real users (for gateways that do not do it themselves).

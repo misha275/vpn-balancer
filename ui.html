@@ -119,7 +119,7 @@ $("#logout").onclick=()=>logout(false);
 $("#tokgo").onclick=async()=>{ TOKEN=$("#tok").value.trim(); try{ await api("GET","/api/overview"); sessionStorage.setItem("tok",TOKEN); start(); }catch(e){ $("#tokerr").textContent=e.message; } };
 $("#tok").addEventListener("keydown",e=>{ if(e.key==="Enter") $("#tokgo").click(); });
 
-const TABS=[["overview","Обзор"],["server","Сервер"],["clients","Клиенты"],["nodes","Узлы"],["settings","Настройки"],["users","Пользователи"],["subs","Серверы"],["wg","WireGuard"],["site","Сайт"],["console","Консоль"]];
+const TABS=[["overview","Обзор"],["server","Сервер"],["clients","Клиенты"],["nodes","Узлы"],["settings","Настройки"],["users","Пользователи"],["subs","Серверы"],["wg","WireGuard"],["site","Сайт"],["forum","Форум"],["backup","Бэкапы"],["console","Консоль"]];
 function renderNav(){ const n=$("#nav"); n.replaceChildren(...TABS.map(([id,t])=>h("button",{class:id===TAB?"on":"",onclick:()=>{TAB=id;load();}},t))); }
 
 async function load(){
@@ -131,6 +131,8 @@ async function load(){
     if (TAB==="subs"){ CAT=await api("GET","/api/catalog"); }
     if (TAB==="wg"){ WG=await api("GET","/api/wg"); }
     if (TAB==="site"){ [SITE,PLANS,ACCS,PAYS,CAT]=await Promise.all([api("GET","/api/site"),api("GET","/api/plans"),api("GET","/api/accounts"),api("GET","/api/payments"),api("GET","/api/catalog")]); }
+    if (TAB==="backup"){ BK=await api("GET","/api/backups"); }
+    if (TAB==="forum"){ FORUM=await api("GET","/api/forum/topics"); if(FTOPIC){ try{ FTOPIC=await api("GET","/api/forum/topics/"+FTOPIC.topic.id); }catch(e){ FTOPIC=null; } } }
     if (TAB==="server"){ [STAT,HIST]=await Promise.all([api("GET","/api/stats"),api("GET","/api/stats/history?range="+RANGE)]); }
     if (TAB==="clients"){ STAT=await api("GET","/api/stats"); }
     if (!DATA) DATA=await api("GET","/api/overview");
@@ -140,7 +142,7 @@ async function load(){
   st.className="pill "+(!DATA.ready||s.net_down?"bad":"ok");
   render();
 }
-function render(){ const m=$("#main"); m.replaceChildren(({overview:vOverview,server:vServer,clients:vClients,nodes:vNodes,settings:vSettings,users:vUsers,subs:vSubs,wg:vWG,site:vSite,console:vConsole})[TAB]()); }
+function render(){ const m=$("#main"); m.replaceChildren(({overview:vOverview,server:vServer,clients:vClients,nodes:vNodes,settings:vSettings,users:vUsers,subs:vSubs,wg:vWG,site:vSite,forum:vForum,backup:vBackup,console:vConsole})[TAB]()); }
 
 function fmtSpeed(k){ return k>0? (k>=1000? (k/1000).toFixed(0)+" Мбит/с": k+" кбит/с") : "—"; }
 function nodeStatus(n){
@@ -223,7 +225,7 @@ function vNodes(){
     h("div",{class:"card tw"},h("table",{},
       h("tr",{},th("name","Название"),th("exit_country","Выход"),th("score","Оценка"),th("latency_ms","Задержка"),th("speed_kbps","Скорость"),h("th",{},"Сервисы"),th("check_at","Проверен"),th("allowed","Статус"),h("th",{},"")),
       rows.map(n=>{ const [t,c]=nodeStatus(n); return h("tr",{},
-        h("td",{},h("div",{},n.name,(n.modes||[]).map(m=>h("span",{class:"mchip"},m==="speed"?"скорость":"пинг"))),h("div",{class:"muted mono"},n.server+" · "+n.type)),
+        h("td",{},h("div",{},n.name,(n.modes||[]).map(m=>h("span",{class:"mchip"},({speed:"скорость",ping:"пинг",spread:"трафик"})[m]||m))),h("div",{class:"muted mono"},n.server+" · "+n.type)),
         h("td",{},(n.exit_country||"?"),h("div",{class:"muted mono"},n.exit_ip||"")),
         h("td",{},n.score>0?n.score.toFixed(1):"0"),
         h("td",{},n.latency_ms?Math.round(n.latency_ms)+" мс":"—"),
@@ -250,6 +252,7 @@ function vSettings(){
   const defAct=h("select",{},[["proxy","через балансировщик"],["block","блокировать (белый список)"]].map(([v,t])=>h("option",{value:v,selected:v===V.default_action},t)));
   const ident=h("select",{},[["endpoint","одинаковые ссылки = один узел"],["link","каждая ссылка отдельным узлом"]].map(([v,t])=>h("option",{value:v,selected:v===V.node_identity},t)));
   const gw=h("input",{value:V.gateway_name});
+  const spreadOn=h("input",{type:"checkbox",style:"width:auto",checked:V.spread_mode});
   const margin=h("input",{type:"number",step:"0.05",min:"1",max:"3",value:V.switch_margin});
   const confirmI=h("input",{type:"number",min:"1",max:"20",value:V.switch_confirm});
   const probes=h("textarea",{},V.probe_urls.join("\n"));
@@ -290,6 +293,10 @@ function vSettings(){
       h("div",{class:"row"},h("div",{},h("div",{class:"k"},"Минимальная скорость, Мбит/с (0 = не учитывать)"),minSpeed),h("div",{class:"grow"},h("div",{class:"k"},"Обязательные сервисы (через запятую)"),reqSvc)),
       h("div",{class:"k",style:"margin-top:10px"},"Сервисы для проверки: имя = адрес, адрес, … (http://, https:// или tcp://хост:порт)"),svcs),
       ()=>save({min_speed_kbps:Math.round(parseFloat(minSpeed.value||"0")*1000),required_services:reqSvc.value.split(/[,\s]+/).filter(Boolean),services:lines(svcs.value)})),
+    sec("Балансировщик «по трафику»",["spread_mode"],h("div",{},
+      h("div",{class:"hint"},"Переносит новые соединения на узел, который меньше всего нагружен за последний час (узлы берутся из лучшей группы по качеству). Смена узла не чаще раза в минуту (spread_interval в config.yaml); уже открытые соединения доживают на старом узле. Нужен шлюз версии 3.6.0: `update --gateway`."),
+      h("label",{class:"row",style:"margin-top:10px"},spreadOn,"Показывать пользователям четвёртый балансировщик (ссылка, подписки, кабинет)")),
+      ()=>save({spread_mode:spreadOn.checked})),
     sec("Название",["gateway_name"],gw,()=>save({gateway_name:gw.value})),
     h("div",{class:"hint"},"Остальные параметры (интервалы проверок, ключи Reality, порты) меняются в config.yaml и требуют перезапуска."));
 }
@@ -573,6 +580,12 @@ function userStatsCard(){
     bars("Трафик по часам (48 часов)",s.hours,{every:6,tick:p=>fmtT(p.t),label:p=>fmtT(p.t,true)}),ses,err);
 }
 
+async function blockAsk(u){
+  const kind=prompt("Причина блокировки «"+u.name+"»: введите unpaid (неуплата), ban (бан) или other (другое)","unpaid");
+  if(!kind) return;
+  const reason=prompt("Пояснение для пользователя (его увидят в кабинете; можно пусто)","")||"";
+  try{ USERS=await api("POST","/api/users/"+encodeURIComponent(u.name)+"/block",{kind:kind.trim().toLowerCase(),reason}); toast("Заблокирован, из шлюза пропадёт в течение 30 секунд"); render(); }catch(e){ toast(e.message,true); }
+}
 function userSubsCard(u){
   const sp=subsPicker(u.own_subs==null?null:u.own_subs,{inheritLabel:"как по тарифу или по умолчанию (сейчас: "+subSource(u)+")",fallback:u.sub_keys});
   const pl=h("select",{style:"width:auto"},h("option",{value:0},"— без тарифа —"),PLANS.map(p=>h("option",{value:p.id,selected:p.id===u.plan_id},p.name)));
@@ -595,12 +608,64 @@ function vUsers(){
     h("div",{class:"card tw"},h("table",{},h("tr",{},h("th",{},"Имя"),h("th",{},"Статус"),h("th",{},"Ссылки"),h("th",{},"")),
       USERS.map(u=>h("tr",{},
         h("td",{},u.name,h("div",{class:"muted"},"подписки: "+subSource(u)),h("div",{class:"muted"},u.sub_fetches?("скачана "+u.sub_fetches+" раз, "+fmtAgo(u.sub_fetched)):"подписку ещё не скачивали")),
-        h("td",{},h("span",{class:u.enabled?"ok":"muted"},u.enabled?"включён":"отключён"),h("div",{class:"muted"},u.expires?"до "+fmtDate(u.expires)+(u.expires*1000<Date.now()?" (вышел)":""):"без срока"),
+        h("td",{},h("span",{class:u.block_kind?"bad":u.enabled?"ok":"muted"},u.block_kind?"заблокирован: "+({unpaid:"неуплата",ban:"бан",other:"другое"}[u.block_kind]||u.block_kind):u.enabled?"включён":"отключён"),u.block_kind&&u.block_reason?h("div",{class:"muted",style:"font-size:12px"},u.block_reason):null,h("div",{class:"muted"},u.expires?"до "+fmtDate(u.expires)+(u.expires*1000<Date.now()?" (вышел)":""):"без срока"),
           h("button",{class:"b s",style:"margin-top:4px",onclick:async()=>{ const e=expiryAsk("Срок доступа для «"+u.name+"»"); if(!e) return; try{ USERS=await api("POST","/api/users/"+encodeURIComponent(u.name)+"/expiry",e); toast("Срок изменён"); render(); }catch(x){ toast(x.message,true);} }},"Срок")),
         h("td",{},u.subscription?linkRow({title:"Подписка",link:u.subscription}):h("div",{class:"hint"},"подписки выключены (задайте домен и включите сайт или sub_listen)"),h("div",{class:"muted",style:"font-size:12px"},(u.sub_keys||[]).map(k=>(CAT&&CAT.subs.find(x=>x.key===k)||{title:k}).title).join(" · ")||"ничего не выбрано")),
         h("td",{},h("div",{class:"row"},h("button",{class:"b s",onclick:()=>openStats(u.name)},"Статистика"),h("button",{class:"b s",onclick:()=>{ UEDIT={name:u.name,mode:"subs"}; render(); window.scrollTo(0,0); }},"Подписки"),
+          u.block_kind?h("button",{class:"b s",onclick:async()=>{ try{ USERS=await api("POST","/api/users/"+encodeURIComponent(u.name)+"/unblock"); toast("Разблокирован"); render(); }catch(e){ toast(e.message,true);} }},"Разблокировать"):h("button",{class:"b d",onclick:()=>{ blockAsk(u); }},"Заблокировать"),
           h("button",{class:"b "+(u.enabled?"d":"s"),onclick:async()=>{ try{ USERS=await api("POST","/api/users/"+encodeURIComponent(u.name)+"/"+(u.enabled?"disable":"enable")); render(); }catch(e){ toast(e.message,true);} }},u.enabled?"Отключить":"Включить"),
           h("button",{class:"b d",title:"удалить навсегда",onclick:async()=>{ if(!confirm("Удалить пользователя «"+u.name+"» навсегда?\nЕго ссылка перестанет работать, статистика будет стёрта. Отключить без удаления можно кнопкой «Отключить».")) return; try{ USERS=await api("DELETE","/api/users/"+encodeURIComponent(u.name)); toast("Пользователь удалён, из шлюза исчезнет в течение 30 секунд"); render(); }catch(e){ toast(e.message,true);} }},"Удалить"))))))));
+}
+
+// ---- backups
+let BK=null;
+async function bkRaw(method,path,body){ const r=await fetch(path,{method,headers:{"Authorization":"Bearer "+TOKEN},body}); if(!r.ok){ let j=null; try{ j=await r.json(); }catch(e){} throw new Error((j&&j.error)||("HTTP "+r.status)); } return r; }
+async function bkAct(fn,msg){ try{ await fn(); if(msg) toast(msg); await load(); }catch(e){ toast(e.message,true); } }
+function fmtSize(n){ return n>1048576?(n/1048576).toFixed(1)+" МБ":Math.max(1,Math.round(n/1024))+" КБ"; }
+function vBackup(){
+  if(!BK) return h("div",{class:"hint"},"загрузка…");
+  const fi=h("input",{type:"file"});
+  const rows=(BK.backups||[]).map(b=>h("tr",{},h("td",{style:"word-break:break-all"},b.name),h("td",{},fmtSize(b.size)),h("td",{},fmtDT(Date.parse(b.created)/1000)),
+    h("td",{},h("div",{class:"row"},
+      h("button",{class:"b s",onclick:()=>bkAct(async()=>{ const r=await bkRaw("GET","/api/backups/"+b.name); const u=URL.createObjectURL(await r.blob()); const a=h("a",{href:u,download:b.name}); document.body.append(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(u),5000); })},"Скачать"),
+      h("button",{class:"b",onclick:()=>{ if(confirm("Заменить ВСЕ данные содержимым этой копии? Текущие данные будут сохранены в страховочную копию.")) bkAct(()=>api("POST","/api/backups/"+b.name+"/restore"),"Восстановлено"); }},"Восстановить"),
+      h("button",{class:"b d",onclick:()=>{ if(confirm("Удалить копию?")) bkAct(()=>api("DELETE","/api/backups/"+b.name),"Удалено"); }},"Удалить")))));
+  return h("div",{},
+    h("div",{class:"card"},h("h2",{},"Резервные копии"),
+      h("p",{class:"hint"},"В копию входят пользователи, тарифы, сайт и платежи, внешние серверы и подписки, WireGuard, форум, трафик и настройки панели. Автоматически: каждые "+BK.interval+", хранится "+BK.keep+" шт. Папка: "+BK.dir+"."),
+      h("p",{class:"hint"},BK.encrypted?"Копии шифруются паролем backup_password из config.yaml.":"Копии НЕ зашифрованы, а в них есть ключи и хеши паролей. Задайте backup_password в config.yaml и храните файлы в надёжном месте."),
+      h("p",{},h("button",{class:"b",onclick:()=>bkAct(()=>api("POST","/api/backups"),"Копия создана")},"Сделать копию сейчас"))),
+    h("div",{class:"card tw"},h("table",{},h("tr",{},h("th",{},"Файл"),h("th",{},"Размер"),h("th",{},"Создана"),h("th",{},"")),rows.length?rows:h("tr",{},h("td",{colspan:4,class:"hint"},"копий пока нет")))),
+    h("div",{class:"card"},h("h2",{},"Восстановить из файла"),h("p",{class:"hint"},"Подходит для переноса на новый сервер: поставьте balancer, скопируйте config.yaml (с тем же backup_password) и загрузите файл."),
+      h("div",{class:"row"},fi,h("button",{class:"b d",onclick:()=>{ const f=fi.files[0]; if(!f) return toast("выберите файл",true); if(confirm("Заменить ВСЕ данные содержимым файла?")) bkAct(async()=>{ await bkRaw("POST","/api/backups/restore",await f.arrayBuffer()); },"Восстановлено"); }},"Восстановить"))));
+}
+
+// ---- forum (moderation of the topics of the site)
+let FORUM=null, FTOPIC=null;
+const FKIND={bug:"Ошибка",question:"Вопрос",idea:"Идея",other:"Другое"};
+async function forumAct(method,path,body,msg){ try{ await api(method,path,body); if(method==="DELETE") FTOPIC=null; if(msg) toast(msg); await load(); }catch(e){ toast(e.message,true); } }
+function vForum(){
+  if(!FORUM) return h("div",{class:"hint"},"загрузка…");
+  const ts=FORUM.topics||[];
+  const list=h("div",{class:"card tw"},h("h2",{},"Форум пользователей"+(FORUM.waiting?" · ждут ответа: "+FORUM.waiting:"")),
+    h("div",{class:"hint"},"Тему видят только вошедшие на сайт пользователи; автор показан как «Пользователь №», без почты и имени. Здесь можно отвечать от имени поддержки, закрывать, закреплять и скрывать темы."),
+    h("table",{},h("tr",{},["Тема","Тип","Автор","Сообщений","Статус","Обновлена",""].map(t=>h("th",{},t))),
+      ts.map(t=>h("tr",{},h("td",{},(t.pinned?"📌 ":"")+t.title,t.hidden?h("span",{class:"muted"}," (скрыта)"):null),h("td",{},FKIND[t.kind]||t.kind),h("td",{class:"muted"},t.author),h("td",{},t.posts),
+        h("td",{class:t.status==="open"?"ok":"muted"},t.status==="open"?"открыта":"закрыта"),h("td",{class:"muted"},fmtDT(t.last)),
+        h("td",{},h("button",{class:"b s",onclick:async()=>{ FTOPIC=await api("GET","/api/forum/topics/"+t.id); render(); window.scrollTo(0,document.body.scrollHeight); }},"Открыть"))))),
+    ts.length?null:h("div",{class:"muted"},"Тем пока нет."));
+  if(!FTOPIC) return h("div",{},list);
+  const t=FTOPIC.topic, ta=h("textarea",{rows:4,style:"width:100%",placeholder:"ответ от имени поддержки",maxlength:4000});
+  const op=(o,label,cls)=>h("button",{class:"b "+(cls||"s"),onclick:()=>forumAct("POST","/api/forum/topics/"+t.id+"/"+o,undefined,"Готово")},label);
+  const det=h("div",{class:"card"},h("div",{class:"row"},h("h2",{style:"margin:0"},(t.pinned?"📌 ":"")+t.title),h("button",{class:"b s",onclick:()=>{ FTOPIC=null; render(); }},"Закрыть окно")),
+    h("div",{class:"muted"},(FKIND[t.kind]||t.kind)+" · "+t.author+" · "+(t.status==="open"?"открыта":"закрыта")+(t.hidden?" · скрыта":"")),
+    h("div",{class:"row"},t.status==="open"?op("close","Закрыть тему"):op("open","Открыть снова"),t.pinned?op("unpin","Открепить"):op("pin","Закрепить"),t.hidden?op("show","Показать"):op("hide","Скрыть"),
+      h("button",{class:"b d",onclick:()=>{ if(confirm("Удалить тему вместе с сообщениями?")) forumAct("DELETE","/api/forum/topics/"+t.id,undefined,"Удалено"); }},"Удалить")),
+    FTOPIC.posts.map(p=>h("div",{class:"card",style:p.staff?"border-color:var(--accent)":""},h("div",{class:"muted",style:"font-size:12px"},p.author+" · "+fmtDT(p.created)+(p.hidden?" · скрыто":"")),
+      h("div",{style:"white-space:pre-wrap;word-break:break-word"},p.body),
+      h("div",{class:"row"},h("button",{class:"b s",onclick:()=>forumAct("POST","/api/forum/posts/"+p.id+"/"+(p.hidden?"show":"hide"),undefined,"Готово")},p.hidden?"Показать":"Скрыть")))),
+    ta,h("p",{},h("button",{class:"b",onclick:async()=>{ if(!ta.value.trim()) return; await forumAct("POST","/api/forum/topics/"+t.id+"/reply",{body:ta.value},"Ответ отправлен"); }},"Ответить")));
+  return h("div",{},list,det);
 }
 
 // ---------------------------------------------------------------- statistics

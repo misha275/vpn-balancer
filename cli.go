@@ -65,6 +65,13 @@ WireGuard (роутер MikroTik и другие устройства подкл
   subs add АДРЕС              добавить подписку
   subs del НОМЕР              удалить подписку
 
+Блокировки и копии
+  block ИМЯ unpaid|ban|other [причина]   заблокировать пользователя (ссылка и вход на сайт перестают работать)
+  unblock ИМЯ                 снять блокировку
+  backup                      сделать резервную копию (папка backup_dir)
+  backups                     список копий
+  restore ИМЯ|ПУТЬ            восстановить данные из копии (перед этим делается страховочная копия)
+
 Прочее
   token                       токен для веб-панели
   check                       проверить config.yaml
@@ -456,6 +463,20 @@ func runCLI(ctx context.Context, cfg *Config, st *Store, cmd string, args []stri
 		return true, cliCountries(ctx, cfg, st, args)
 	case "subs":
 		return true, cliSubs(ctx, cfg, st, args)
+	case "block", "unblock":
+		if len(args) < 1 || (cmd == "block" && len(args) < 2) {
+			return true, fmt.Errorf("usage: block ИМЯ unpaid|ban|other [причина]  |  unblock ИМЯ")
+		}
+		path, body := "/api/users/"+url.PathEscape(args[0])+"/unblock", any(nil)
+		if cmd == "block" {
+			path, body = "/api/users/"+url.PathEscape(args[0])+"/block", map[string]string{"kind": args[1], "reason": strings.Join(args[2:], " ")}
+		}
+		if _, err := cliCall(ctx, cfg, st, "POST", path, body); err != nil {
+			return true, err
+		}
+		fmt.Println("готово")
+	case "backup", "backups", "restore":
+		return true, cliBackup(ctx, cfg, st, cmd, args)
 	default:
 		return false, nil
 	}
@@ -792,6 +813,45 @@ func cliLogs(ctx context.Context, cfg *Config, st *Store, args []string) error {
 	}
 	if len(lines) == 0 {
 		fmt.Println("(пока пусто)")
+	}
+	return nil
+}
+
+// cliBackup works on the files directly (and on the database), so it also works while the controller is stopped.
+func cliBackup(ctx context.Context, cfg *Config, st *Store, cmd string, args []string) error {
+	switch cmd {
+	case "backup":
+		info, err := CreateBackup(ctx, cfg, st, "")
+		if err != nil {
+			return err
+		}
+		fmt.Printf("готово: %s/%s (%d КБ%s)\n", cfg.backupDir(), info.Name, info.Size/1024, map[bool]string{true: ", зашифрована", false: ""}[info.Encrypted])
+	case "backups":
+		l := ListBackups(cfg)
+		for _, b := range l {
+			fmt.Printf("%-52s %6d КБ  %s\n", b.Name, b.Size/1024, b.Created.Local().Format("2006-01-02 15:04"))
+		}
+		if len(l) == 0 {
+			fmt.Println("копий нет (", cfg.backupDir(), ")")
+		}
+	case "restore":
+		if len(args) < 1 {
+			return fmt.Errorf("usage: restore ИМЯ_ФАЙЛА|ПУТЬ  (список: backups)")
+		}
+		var raw []byte
+		var err error
+		if strings.ContainsRune(args[0], '/') {
+			raw, err = os.ReadFile(args[0])
+		} else {
+			raw, err = ReadBackupFile(cfg, args[0])
+		}
+		if err != nil {
+			return err
+		}
+		if err := RestoreFromData(ctx, cfg, st, raw); err != nil {
+			return err
+		}
+		fmt.Println("восстановлено; перед этим сохранена страховочная копия (…-before-restore). Данные подхватятся в течение 30 секунд")
 	}
 	return nil
 }

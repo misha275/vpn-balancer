@@ -114,14 +114,14 @@ type Site struct {
 	subs   *SubServer
 	secret []byte
 
-	loginIP, loginMail, regIP, payAcc *limiter
-	dummyHash                         []byte
+	loginIP, loginMail, regIP, payAcc, forumLimit *limiter
+	dummyHash                                     []byte
 }
 
 func NewSite(cfg *Config, st *Store) *Site {
 	h, _ := bcrypt.GenerateFromPassword([]byte("dummy-password-for-timing"), bcrypt.DefaultCost)
 	return &Site{cfg: cfg, st: st, subs: NewSubServer(cfg, st), secret: []byte(derive(cfg.Reality.PrivateKey+cfg.TestSecret, "site-csrf")),
-		loginIP: newLimiter(15, 10*time.Minute), loginMail: newLimiter(6, 10*time.Minute), regIP: newLimiter(6, time.Hour), payAcc: newLimiter(10, time.Hour), dummyHash: h}
+		loginIP: newLimiter(15, 10*time.Minute), loginMail: newLimiter(6, 10*time.Minute), regIP: newLimiter(6, time.Hour), payAcc: newLimiter(10, time.Hour), forumLimit: newLimiter(10, 15*time.Minute), dummyHash: h}
 }
 
 func (s *Site) provider() PaymentProvider {
@@ -211,9 +211,11 @@ type pageData struct {
 	FormEmail            string
 	Plans                []planView
 	Payment              string
+	Forum                forumData
 
 	// cabinet
 	State, Until, DaysWord, Created             string
+	BlockKind, BlockReason                      string
 	DaysLeft                                    int
 	TrafficAll, Traffic30, UpAll, DownAll       string
 	Links                                       []linkItem
@@ -313,6 +315,7 @@ func (s *Site) Handler() http.Handler {
 		w.Header().Set("Content-Type", "text/plain")
 		w.Write([]byte("User-agent: *\nDisallow: /\n"))
 	})
+	s.registerForum(mux)
 	mux.Handle("GET /sub/", s.subs.Handler())
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		acc, h := s.current(r)
@@ -372,7 +375,11 @@ func (s *Site) loginPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if acc.Blocked {
-		fail(403, "Аккаунт заблокирован. Обратитесь в поддержку")
+		msg := "Аккаунт заблокирован."
+		if acc.BlockReason != "" {
+			msg += " Причина: " + acc.BlockReason + "."
+		}
+		fail(403, msg+" Обратитесь в поддержку")
 		return
 	}
 	s.loginMail.clear(email)
@@ -535,6 +542,7 @@ func (s *Site) cabinetData(r *http.Request, acc *Account, h string) pageData {
 		d.UpAll, d.DownAll = fmtBytesRu(t.AllUp), fmtBytesRu(t.AllDown)
 	}
 	d.Links = s.accountLinks(r, acc)
+	d.BlockKind, d.BlockReason = acc.BlockKind, acc.BlockReason
 	if d.State == "expired" {
 		d.Hint = "Пока подписка не продлена, ссылки не работают. После продления они заработают снова (обновите подписку в приложении)."
 	}

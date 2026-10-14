@@ -59,6 +59,11 @@ func (c *Checker) modeBest(mode string, pool []*NodeState, now time.Time) *NodeS
 			if a > b || (a == b && better(st, best)) {
 				best = st
 			}
+		case mode == modeSpread:
+			a, b := c.spreadLoad[st.Node.ID], c.spreadLoad[best.Node.ID]
+			if a < b || (a == b && better(st, best)) {
+				best = st
+			}
 		case mode == modePing:
 			a, b := st.ewma, best.ewma
 			if a > 0 && (b <= 0 || a < b || (a == b && better(st, best))) {
@@ -77,6 +82,9 @@ func (c *Checker) decideModeLocked(mode string, cycle bool) (target *Node, reaso
 	if len(pool) == 0 {
 		return nil, ""
 	}
+	if mode == modeSpread {
+		c.decaySpreadLocked(now)
+	}
 	best := c.modeBest(mode, pool, now)
 	cur := c.states[c.modeCur[mode]]
 	if cur == nil || cur.score <= 0 || !cur.Node.Allowed(c.cfg) {
@@ -87,6 +95,9 @@ func (c *Checker) decideModeLocked(mode string, cycle bool) (target *Node, reaso
 		c.qualityIssue(best, now, c.cfg.getMinSpeed(), c.cfg.getRequired()) == "" {
 		c.modeCand[mode], c.modeCnt[mode] = "", 0
 		return best.Node, "quality"
+	}
+	if mode == modeSpread {
+		return c.decideSpreadLocked(best, cur, now)
 	}
 	if best.Node.ID == cur.Node.ID {
 		c.modeCand[mode], c.modeCnt[mode] = "", 0
@@ -154,6 +165,9 @@ func (c *Checker) switchMode(mode string, n *Node, reason string) {
 		prevName = st.Node.Name
 	}
 	c.modeCur[mode] = n.ID
+	if mode == modeSpread {
+		c.spreadRot = time.Now()
+	}
 	c.mu.Unlock()
 	c.cfg.setModeDefault(mode, n.Tag())
 	log.Printf("switch[%s]: %s -> %s (%s)", mode, prevName, n.Name, reason)

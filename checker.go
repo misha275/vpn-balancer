@@ -137,6 +137,11 @@ type Checker struct {
 	modeCur  map[string]string // extra balancer modes: node ID each one is on
 	modeCand map[string]string
 	modeCnt  map[string]int
+
+	// mode "by traffic" (checker_spread.go)
+	spreadLoad map[string]float64 // node id -> traffic carried lately (decays with time)
+	spreadAt   time.Time          // when spreadLoad was decayed last
+	spreadRot  time.Time          // when the node of the mode was changed last
 }
 
 func NewChecker(cfg *Config, st *Store, core *Core, n *Notifier) *Checker {
@@ -835,7 +840,7 @@ func (c *Checker) Snapshot() Snapshot {
 	if st := c.states[c.pinned]; st != nil {
 		s.Pinned = st.Node.Name
 	}
-	for _, m := range allModes {
+	for _, m := range linkModes(c.cfg) {
 		id := c.current
 		if m != "" {
 			id = c.modeCur[m]

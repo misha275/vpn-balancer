@@ -156,6 +156,18 @@ var settingDefs = []settingDef{
 		get: func(c *Config) any { return c.ExitCheck != nil && *c.ExitCheck },
 	},
 	{
+		key:  "spread_mode",
+		help: "показывать пользователям балансировщик «по трафику» (true/false)",
+		parse: func(raw json.RawMessage) (func(*Config), error) {
+			var v bool
+			if err := json.Unmarshal(raw, &v); err != nil {
+				return nil, fmt.Errorf("spread_mode: нужно true или false")
+			}
+			return func(c *Config) { c.SpreadMode = &v }, nil
+		},
+		get: func(c *Config) any { return c.SpreadMode != nil && *c.SpreadMode },
+	},
+	{
 		key:  "rules",
 		help: "правила фильтра трафика: [{action: direct|block|proxy, match: [...]}]",
 		parse: func(raw json.RawMessage) (func(*Config), error) {

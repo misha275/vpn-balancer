@@ -209,3 +209,32 @@ CREATE TABLE IF NOT EXISTS bundle_sources (
     source_id BIGINT NOT NULL REFERENCES ext_sources(id) ON DELETE CASCADE,
     PRIMARY KEY (bundle_id, source_id)
 );
+
+-- блокировка пользователя: неуплата, бан, другое (с причиной); заблокированный не получает ключ и подписку
+ALTER TABLE users ADD COLUMN IF NOT EXISTS block_kind TEXT CHECK (block_kind IN ('unpaid','ban','other'));
+ALTER TABLE users ADD COLUMN IF NOT EXISTS block_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS blocked_at TIMESTAMPTZ;
+
+-- форум для сообщений об ошибках и вопросов (виден вошедшим пользователям сайта; модерация в панели)
+CREATE TABLE IF NOT EXISTS forum_topics (
+    id         BIGSERIAL PRIMARY KEY,
+    account_id BIGINT REFERENCES accounts(id) ON DELETE SET NULL,
+    kind       TEXT NOT NULL DEFAULT 'bug' CHECK (kind IN ('bug','question','idea','other')),
+    title      TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','closed')),
+    pinned     BOOLEAN NOT NULL DEFAULT false,
+    hidden     BOOLEAN NOT NULL DEFAULT false,
+    created    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_post  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS forum_topics_order ON forum_topics (pinned DESC, last_post DESC);
+CREATE TABLE IF NOT EXISTS forum_posts (
+    id         BIGSERIAL PRIMARY KEY,
+    topic_id   BIGINT NOT NULL REFERENCES forum_topics(id) ON DELETE CASCADE,
+    account_id BIGINT REFERENCES accounts(id) ON DELETE SET NULL,
+    staff      BOOLEAN NOT NULL DEFAULT false,
+    body       TEXT NOT NULL,
+    hidden     BOOLEAN NOT NULL DEFAULT false,
+    created    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS forum_posts_topic ON forum_posts (topic_id, id);

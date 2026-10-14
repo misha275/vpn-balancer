@@ -105,7 +105,11 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/qr", a.auth(a.qr))
 	a.registerSite(mux)
 	a.registerSubs(mux)
+	a.registerForum(mux)
+	a.registerBackup(mux)
 	mux.HandleFunc("POST /api/users", a.auth(a.addUser))
+	mux.HandleFunc("POST /api/users/{name}/block", a.auth(a.userBlock))
+	mux.HandleFunc("POST /api/users/{name}/unblock", a.auth(a.userUnblock))
 	mux.HandleFunc("POST /api/users/{name}/{op}", a.auth(a.userOp))
 	mux.HandleFunc("DELETE /api/users/{name}", a.auth(a.delUser))
 	mux.HandleFunc("GET /api/wg", a.auth(a.wgGet))
@@ -229,6 +233,9 @@ type userView struct {
 	PlanID       int64      `json:"plan_id"`
 	SubFetched   int64      `json:"sub_fetched"`
 	SubFetches   int64      `json:"sub_fetches"`
+	BlockKind    string     `json:"block_kind,omitempty"` // "" = not blocked: unpaid | ban | other
+	BlockReason  string     `json:"block_reason,omitempty"`
+	BlockedAt    int64      `json:"blocked_at,omitempty"`
 }
 
 // linkView is a link with its title (the panel shows a QR code for each).
@@ -246,7 +253,7 @@ func newUserViewB(cfg *Config, u User, bundles map[string]string) userView {
 	if u.Expires != nil {
 		v.Expires = u.Expires.Unix()
 	}
-	for _, m := range allModes {
+	for _, m := range linkModes(cfg) {
 		k := m
 		if k == "" {
 			k = "current"
@@ -262,6 +269,10 @@ func newUserViewB(cfg *Config, u User, bundles map[string]string) userView {
 		v.SubFetched = u.SubFetched.Unix()
 	}
 	v.SubFetches = u.SubFetches
+	v.BlockKind, v.BlockReason = u.BlockKind, u.BlockReason
+	if u.BlockedAt != nil {
+		v.BlockedAt = u.BlockedAt.Unix()
+	}
 	v.Subs = []linkView{}
 	if v.Subscription != "" {
 		for _, k := range v.SubKeys {
@@ -333,6 +344,31 @@ func (a *API) userOp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.store.SetUserEnabled(r.Context(), name, op == "enable"); err != nil {
+		apiErr(w, 404, err)
+		return
+	}
+	a.users(w, r)
+}
+
+// userBlock blocks a user: {"kind":"unpaid|ban|other","reason":"..."}.
+func (a *API) userBlock(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Kind   string `json:"kind"`
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&in); err != nil {
+		apiErr(w, 400, fmt.Errorf("ожидается JSON {kind: unpaid|ban|other, reason}"))
+		return
+	}
+	if err := a.store.BlockUser(r.Context(), r.PathValue("name"), in.Kind, in.Reason); err != nil {
+		apiErr(w, 400, err)
+		return
+	}
+	a.users(w, r)
+}
+
+func (a *API) userUnblock(w http.ResponseWriter, r *http.Request) {
+	if err := a.store.UnblockUser(r.Context(), r.PathValue("name")); err != nil {
 		apiErr(w, 404, err)
 		return
 	}

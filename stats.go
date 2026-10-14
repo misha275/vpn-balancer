@@ -17,6 +17,7 @@ type Collector struct {
 	logs *LogRing // console of the controller
 
 	interval time.Duration
+	onSpread func(int64) // traffic of the "by traffic" mode since the previous report (set by main)
 
 	mu      sync.RWMutex
 	hist    []SysSample
@@ -43,6 +44,13 @@ type Collector struct {
 func NewCollector(st *Store, core *Core, logs *LogRing) *Collector {
 	return &Collector{st: st, core: core, logs: logs, interval: 5 * time.Second,
 		speed: map[string]UserDelta{}, active: map[string]time.Time{}, pending: map[string]UserDelta{}, seen: map[string]SeenInfo{}}
+}
+
+// SetOnSpread registers the receiver of the traffic of the "by traffic" mode.
+func (c *Collector) SetOnSpread(f func(int64)) {
+	c.mu.Lock()
+	c.onSpread = f
+	c.mu.Unlock()
 }
 
 func (c *Collector) Run(ctx context.Context) {
@@ -103,6 +111,9 @@ func (c *Collector) Sample(ctx context.Context, keep bool) {
 		c.speed = map[string]UserDelta{}
 	} else {
 		c.gwErr = ""
+		if c.onSpread != nil && gs.ModeBytes[modeSpread] > 0 {
+			c.onSpread(gs.ModeBytes[modeSpread])
+		}
 		foldGW(&gs) // a gateway older than the controller reports "alice~speed" as a separate user
 		dt := now.Sub(c.prevTot.at).Seconds()
 		if c.prevTot.ok && c.prevTot.epoch == gs.Epoch && dt > 0.5 {

@@ -103,3 +103,14 @@ http_listen: 0.0.0.0:8080  # внутри контейнера; наружу п�
 # cloudflare_token: ""        # токен с правами Zone:Read и DNS:Edit
 # ddns_names: []              # какие имена обновлять (по умолчанию domain)
 # ddns_interval: 5m
+
+# --- резервные копии (по умолчанию: раз в сутки, 14 штук в /var/lib/balancer/backups) ---
+# backup_dir: /var/lib/balancer/backups
+# backup_interval: 24h          # отрицательное значение выключает автоматические копии
+# backup_keep: 14
+# backup_password: ""           # шифрует файлы копий (в них ключи и хеши паролей!)
+# backup_telegram: false        # отправлять зашифрованные копии в чат Telegram
+
+# --- балансировщик «по трафику» (скрыт от пользователей, пока не включён) ---
+# spread_mode: false
+# spread_interval: 60s

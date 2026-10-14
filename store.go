@@ -37,17 +37,21 @@ type User struct {
 
 	SubFetched *time.Time // last time the subscription was downloaded
 	SubFetches int64
+
+	BlockKind   string // "" = not blocked, else unpaid | ban | other
+	BlockReason string
+	BlockedAt   *time.Time
 }
 
-const userCols = `id,name,uuid::text,enabled,sub_token,expires_at,subs,plan_id,(SELECT p.subs FROM plans p WHERE p.id=users.plan_id),sub_fetched,sub_fetches`
+const userCols = `id,name,uuid::text,enabled,sub_token,expires_at,subs,plan_id,(SELECT p.subs FROM plans p WHERE p.id=users.plan_id),sub_fetched,sub_fetches,COALESCE(block_kind,''),block_reason,blocked_at`
 
 func scanUser(r interface{ Scan(...any) error }, u *User) error {
-	return r.Scan(&u.ID, &u.Name, &u.UUID, &u.Enabled, &u.SubToken, &u.Expires, &u.Subs, &u.PlanID, &u.PlanSubs, &u.SubFetched, &u.SubFetches)
+	return r.Scan(&u.ID, &u.Name, &u.UUID, &u.Enabled, &u.SubToken, &u.Expires, &u.Subs, &u.PlanID, &u.PlanSubs, &u.SubFetched, &u.SubFetches, &u.BlockKind, &u.BlockReason, &u.BlockedAt)
 }
 
 // Active reports whether the key may work now (enabled and the period has not ended).
 func (u User) Active(now time.Time) bool {
-	return u.Enabled && (u.Expires == nil || u.Expires.After(now))
+	return u.Enabled && u.BlockKind == "" && (u.Expires == nil || u.Expires.After(now))
 }
 
 type CheckRow struct {
@@ -151,7 +155,7 @@ func (s *Store) InsertChecks(ctx context.Context, cs []CheckRow) error {
 }
 
 func (s *Store) EnabledUsers(ctx context.Context) ([]User, error) {
-	rows, err := s.pool.Query(ctx, `SELECT `+userCols+` FROM users WHERE enabled AND (expires_at IS NULL OR expires_at > now()) ORDER BY id`)
+	rows, err := s.pool.Query(ctx, `SELECT `+userCols+` FROM users WHERE enabled AND block_kind IS NULL AND (expires_at IS NULL OR expires_at > now()) ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -201,6 +205,44 @@ func (s *Store) SetUserEnabled(ctx context.Context, name string, enabled bool) e
 	return err
 }
 
+// BlockUser stops a user for a reason (kind: unpaid, ban or other): no gateway key, no subscription. A ban also closes
+// the login to the site. Unblocking brings everything back (a payment lifts "unpaid" by itself).
+func (s *Store) BlockUser(ctx context.Context, name, kind, reason string) error {
+	if kind != "unpaid" && kind != "ban" && kind != "other" {
+		return errors.New("вид блокировки: unpaid, ban или other")
+	}
+	reason = strings.TrimSpace(reason)
+	if len([]rune(reason)) > 300 {
+		return errors.New("причина до 300 символов")
+	}
+	tag, err := s.pool.Exec(ctx, `UPDATE users SET block_kind=$2, block_reason=$3, blocked_at=now() WHERE name=$1`, name, kind, reason)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return errors.New("user not found")
+	}
+	if kind == "ban" {
+		_, err = s.pool.Exec(ctx, `UPDATE accounts SET blocked=true WHERE user_id=(SELECT id FROM users WHERE name=$1)`, name)
+	}
+	return err
+}
+
+func (s *Store) UnblockUser(ctx context.Context, name string) error {
+	var kind *string
+	if err := s.pool.QueryRow(ctx, `SELECT block_kind FROM users WHERE name=$1`, name).Scan(&kind); err != nil {
+		return errors.New("user not found")
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE users SET block_kind=NULL, block_reason='', blocked_at=NULL WHERE name=$1`, name); err != nil {
+		return err
+	}
+	if kind != nil && *kind == "ban" {
+		_, err := s.pool.Exec(ctx, `UPDATE accounts SET blocked=false WHERE user_id=(SELECT id FROM users WHERE name=$1)`, name)
+		return err
+	}
+	return nil
+}
+
 func (s *Store) LogSwitch(ctx context.Context, from, to, reason string) {
 	_, _ = s.pool.Exec(ctx, `INSERT INTO switches(from_node,to_node,reason) VALUES($1,$2,$3)`, from, to, reason)
 }
@@ -229,8 +271,7 @@ func (s *Store) SetExit(ctx context.Context, id, ip, country string) error {
 // UserBySubToken finds an enabled user by the secret in the subscription URL.
 func (s *Store) UserBySubToken(ctx context.Context, token string) (*User, error) {
 	var u User
-	err := s.pool.QueryRow(ctx, `SELECT `+userCols+` FROM users WHERE sub_token=$1 AND enabled AND (expires_at IS NULL OR expires_at > now())`, token).
-		Scan(&u.ID, &u.Name, &u.UUID, &u.Enabled, &u.SubToken, &u.Expires, &u.Subs, &u.PlanID, &u.PlanSubs, &u.SubFetched, &u.SubFetches)
+	err := scanUser(s.pool.QueryRow(ctx, `SELECT `+userCols+` FROM users WHERE sub_token=$1 AND enabled AND block_kind IS NULL AND (expires_at IS NULL OR expires_at > now())`, token), &u)
 	if err != nil {
 		return nil, err
 	}

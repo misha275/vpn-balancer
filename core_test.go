@@ -131,7 +131,7 @@ func TestCoreBuildConfigStructure(t *testing.T) {
 	if err := json.Unmarshal(data, &conf); err != nil {
 		t.Fatal(err)
 	}
-	if conf.Route.Final != "proxy" || len(conf.Route.Rules) != 4 { // 2 probes + the final rules of the speed and ping modes
+	if conf.Route.Final != "proxy" || len(conf.Route.Rules) != 5 { // 2 probes + the final rules of the speed, ping and spread modes
 		t.Fatalf("route: %+v", conf.Route)
 	}
 	var sel map[string]any

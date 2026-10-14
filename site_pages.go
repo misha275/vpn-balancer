@@ -40,7 +40,7 @@ const siteTplText = `
 {{define "head"}}<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex"><title>{{.Title}} · {{.Site}}</title><style>` + siteCSS + `</style></head><body>
 <header><div class="bar"><a class="name" href="/">{{.Site}}</a>
-{{if .Email}}<a href="/cabinet">Кабинет</a><form method="post" action="/logout" style="margin:0"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn s sm">Выйти</button></form>
+{{if .Email}}<a href="/cabinet">Кабинет</a><a href="/forum">Форум</a><form method="post" action="/logout" style="margin:0"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn s sm">Выйти</button></form>
 {{else}}<a href="/login">Войти</a>{{if .CanRegister}}<a class="btn sm" href="/register">Регистрация</a>{{end}}{{end}}</div></header><main>{{end}}
 {{define "foot"}}</main>{{if .Support}}<footer>{{.Support}}</footer>{{end}}
 <script nonce="{{.Nonce}}">document.addEventListener("click",function(e){var b=e.target.closest("[data-copy]");if(!b)return;var t=document.getElementById(b.dataset.copy).value;
@@ -77,6 +77,7 @@ const siteTplText = `
 
 {{define "cabinet"}}{{template "head" .}}
 {{if .Flash}}<div class="okbox">{{.Flash}}</div>{{end}}{{if .Error}}<div class="err">{{.Error}}</div>{{end}}
+{{if .BlockKind}}<div class="err"><b>{{if eq .BlockKind "unpaid"}}Доступ приостановлен: нет оплаты{{else if eq .BlockKind "ban"}}Аккаунт заблокирован{{else}}Доступ приостановлен{{end}}.</b>{{if .BlockReason}} {{.BlockReason}}{{end}}{{if eq .BlockKind "unpaid"}} После оплаты доступ вернётся сам.{{else if .Support}} Вопросы: {{.Support}}{{end}}</div>{{end}}
 <div class="grid">
 <div class="card"><div class="muted">Подписка</div>
 {{if eq .State "active"}}<div class="big ok">Активна</div><div>до {{.Until}}</div><div class="{{if le .DaysLeft 3}}warn{{else}}muted{{end}}">осталось {{.DaysLeft}} {{.DaysWord}}</div>

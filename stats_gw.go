@@ -60,6 +60,9 @@ type GWStats struct {
 	Deltas    map[string]UserDelta `json:"deltas"`
 	Invalid   []InvalidInfo        `json:"invalid"`
 	Errs      map[string]UserErr   `json:"errs,omitempty"`
+	// ModeBytes is the traffic (up+down) since the previous report of the sessions of the balancer modes that the
+	// controller balances by traffic ("spread").
+	ModeBytes map[string]int64 `json:"mode_bytes,omitempty"`
 }
 
 // UserErr summarises what went wrong for one user since the gateway started.
@@ -90,6 +93,7 @@ type tracker struct {
 	mu      sync.Mutex
 	live    map[sessKey]*session
 	deltas  map[string]UserDelta
+	modeB   map[string]int64
 	invalid map[string]*InvalidInfo
 	recent  map[string]int64 // invalid connections per ip since the last summary line
 	next    uint64
@@ -153,6 +157,12 @@ func (t *tracker) account(s *session, final bool) {
 		return // wait for the user line
 	}
 	up, down := s.up.Load(), s.down.Load()
+	if n := (up - s.repUp) + (down - s.repDown); s.mode == modeSpread && !s.invalid && n > 0 {
+		if t.modeB == nil {
+			t.modeB = map[string]int64{}
+		}
+		t.modeB[modeSpread] += n
+	}
 	d := t.deltas[name]
 	d.Up += up - s.repUp
 	d.Down += down - s.repDown
@@ -248,6 +258,7 @@ func (t *tracker) drain() GWStats {
 	}
 	sort.Slice(st.Sessions, func(i, j int) bool { return st.Sessions[i].ID < st.Sessions[j].ID })
 	st.Deltas, t.deltas = t.deltas, map[string]UserDelta{}
+	st.ModeBytes, t.modeB = t.modeB, nil
 	if len(t.errs) > 0 {
 		st.Errs = make(map[string]UserErr, len(t.errs))
 		for k, v := range t.errs {

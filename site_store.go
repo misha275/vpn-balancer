@@ -37,18 +37,21 @@ type Account struct {
 	Subs     []string
 	PlanID   *int64
 	PlanSubs []string
+
+	BlockKind   string
+	BlockReason string
 }
 
 // User returns the VPN user of the account (for building links).
 func (a *Account) User() User {
-	return User{ID: a.UserID, Name: a.UserName, UUID: a.UUID, Enabled: a.Enabled, SubToken: a.SubToken, Expires: a.Expires, Subs: a.Subs, PlanID: a.PlanID, PlanSubs: a.PlanSubs}
+	return User{ID: a.UserID, Name: a.UserName, UUID: a.UUID, Enabled: a.Enabled, SubToken: a.SubToken, Expires: a.Expires, Subs: a.Subs, PlanID: a.PlanID, PlanSubs: a.PlanSubs, BlockKind: a.BlockKind, BlockReason: a.BlockReason}
 }
 
-const accountCols = `a.id, a.email, a.pass_hash, a.user_id, a.blocked, a.note, a.created, a.last_login, u.name, u.uuid::text, u.sub_token, u.expires_at, u.enabled, u.subs, u.plan_id, (SELECT p.subs FROM plans p WHERE p.id=u.plan_id)`
+const accountCols = `a.id, a.email, a.pass_hash, a.user_id, a.blocked, a.note, a.created, a.last_login, u.name, u.uuid::text, u.sub_token, u.expires_at, u.enabled, u.subs, u.plan_id, (SELECT p.subs FROM plans p WHERE p.id=u.plan_id), COALESCE(u.block_kind,''), u.block_reason`
 
 func scanAccount(r pgx.Row) (*Account, error) {
 	var a Account
-	err := r.Scan(&a.ID, &a.Email, &a.PassHash, &a.UserID, &a.Blocked, &a.Note, &a.Created, &a.LastLogin, &a.UserName, &a.UUID, &a.SubToken, &a.Expires, &a.Enabled, &a.Subs, &a.PlanID, &a.PlanSubs)
+	err := r.Scan(&a.ID, &a.Email, &a.PassHash, &a.UserID, &a.Blocked, &a.Note, &a.Created, &a.LastLogin, &a.UserName, &a.UUID, &a.SubToken, &a.Expires, &a.Enabled, &a.Subs, &a.PlanID, &a.PlanSubs, &a.BlockKind, &a.BlockReason)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -428,6 +431,9 @@ func (s *Store) MarkPaid(ctx context.Context, id int64) (bool, error) {
 	}
 	if _, err := tx.Exec(ctx, `UPDATE users SET expires_at = CASE WHEN expires_at IS NULL THEN NULL ELSE GREATEST(expires_at, now()) + make_interval(days => $2) END
 		WHERE id = (SELECT user_id FROM accounts WHERE id=$1)`, accID, days); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE users SET block_kind=NULL, block_reason='', blocked_at=NULL WHERE block_kind='unpaid' AND id = (SELECT user_id FROM accounts WHERE id=$1)`, accID); err != nil {
 		return false, err
 	}
 	if planID != nil { // the subscriptions of the paid plan apply from now on (a deleted plan changes nothing)

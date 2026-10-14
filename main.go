@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -10,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/netip"
@@ -81,6 +83,17 @@ type Config struct {
 	TelegramToken     string        `yaml:"telegram_token"`
 	TelegramChat      string        `yaml:"telegram_chat"`
 	HTTPListen        string        `yaml:"http_listen"`
+
+	// --- mode "by traffic" (checker_spread.go) ---
+	SpreadMode     *bool         `yaml:"spread_mode"`     // show the "by traffic" balancer to users (default off)
+	SpreadInterval time.Duration `yaml:"spread_interval"` // how often the node of the mode may change (default 60s)
+
+	// --- backups (backup.go) ---
+	BackupDir      string        `yaml:"backup_dir"`      // default: <work_dir>/backups
+	BackupInterval time.Duration `yaml:"backup_interval"` // automatic backup period (default 24h, negative = off)
+	BackupKeep     int           `yaml:"backup_keep"`     // how many automatic backups to keep (default 14)
+	BackupPassword string        `yaml:"backup_password"` // encrypts the files (they hold keys and password hashes)
+	BackupTelegram bool          `yaml:"backup_telegram"` // send encrypted backups to the Telegram chat
 
 	// --- WireGuard for routers (see wireguard.go) ---
 	WGPort     int    `yaml:"wg_port"`     // UDP port of the tunnel (default 51820)
@@ -178,6 +191,8 @@ func LoadConfig(path string) (*Config, error) {
 		log.Printf("config: public_host is an IP address; set domain: to build links from a domain name (they survive a change of the server's IP)")
 	}
 	def(&c.DDNSInterval, 5*time.Minute)
+	def(&c.BackupInterval, 24*time.Hour)
+	defI(&c.BackupKeep, 14)
 	defS(&c.SubUserAgent, "sing-box")
 	def(&c.SubRefresh, 30*time.Minute)
 	def(&c.NodeGrace, 48*time.Hour)
@@ -357,6 +372,32 @@ func (n *Notifier) Notify(key, msg string, every time.Duration) {
 	}()
 }
 
+// SendFile uploads a file to the Telegram chat (only used for encrypted backups).
+func (n *Notifier) SendFile(path, name string) {
+	if n.token == "" || n.chat == "" {
+		return
+	}
+	go func() {
+		data, err := os.ReadFile(path)
+		if err != nil || len(data) > 45<<20 {
+			return
+		}
+		var buf bytes.Buffer
+		mw := multipart.NewWriter(&buf)
+		mw.WriteField("chat_id", n.chat)
+		fw, _ := mw.CreateFormFile("document", name)
+		fw.Write(data)
+		mw.Close()
+		cl := &http.Client{Timeout: 2 * time.Minute}
+		resp, err := cl.Post("https://api.telegram.org/bot"+n.token+"/sendDocument", mw.FormDataContentType(), &buf)
+		if err != nil {
+			log.Printf("telegram: %v", scrubErr(err))
+			return
+		}
+		resp.Body.Close()
+	}()
+}
+
 func frontSNI(cfg *Config) string { sni, _, _ := cfg.realityFront(); return sni }
 
 func userLink(cfg *Config, name, uuid string) string {
@@ -387,7 +428,7 @@ func subURLKind(cfg *Config, token, kind string) string {
 
 func printUser(cfg *Config, u User) {
 	fmt.Printf("%-20s enabled=%-5v\n  gateway:      %s\n", u.Name, u.Enabled, userLink(cfg, cfg.getGatewayName(), u.UUID))
-	for _, m := range balModes {
+	for _, m := range linkModes(cfg)[1:] {
 		fmt.Printf("  %-13s %s\n", modeTitle(m)+":", modeLink(cfg, u, m))
 	}
 	if s := subURL(cfg, u.SubToken); s != "" {
@@ -527,6 +568,7 @@ func run(ctx context.Context, cfg *Config, st *Store) {
 	col := NewCollector(st, core, ctrlLogs)
 	go col.Run(ctx)
 	chk := NewChecker(cfg, st, core, notify)
+	col.SetOnSpread(chk.AddSpreadBytes)
 	subs := &Subs{cfg: cfg, store: st, notify: notify, fails: map[string]int{}}
 	refreshCh := make(chan struct{}, 1)
 	// settings saved in the database (web panel / command line) override config.yaml and apply live
@@ -593,6 +635,7 @@ func run(ctx context.Context, cfg *Config, st *Store) {
 	go chk.Run(ctx)
 	go wgm.Reconcile(ctx)
 	go NewDDNS(cfg, notify).Run(ctx)
+	go BackupLoop(ctx, cfg, st, notify)
 
 	go func() {
 		if len(nodes) > 0 {
