@@ -59,6 +59,8 @@ func subUserinfo(tr UserTraffic, u *User) string {
 	s := fmt.Sprintf("upload=%d; download=%d; total=0", tr.AllUp, tr.AllDown)
 	if u.Expires != nil {
 		s += fmt.Sprintf("; expire=%d", u.Expires.Unix())
+	} else {
+		s += "; expire=0" // the usual way to say "no end": the apps show an infinity sign instead of a date
 	}
 	return s
 }
@@ -245,6 +247,10 @@ func (s *SubServer) Handler() http.Handler {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("profile-update-interval", "6")
 			w.Header().Set("profile-title", "base64:"+base64.StdEncoding.EncodeToString([]byte(title)))
+			if u.Expires == nil {
+				// apps that show an announcement (Happ and others) say it in words; the rest just show the infinity sign
+				w.Header().Set("announce", "base64:"+base64.StdEncoding.EncodeToString([]byte("Подписка бессрочная")))
+			}
 			if r.URL.Query().Get("raw") == "1" {
 				fmt.Fprint(w, body+"\n") // for humans: the same list without base64
 				return

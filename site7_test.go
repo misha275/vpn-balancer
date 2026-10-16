@@ -397,7 +397,10 @@ func TestSubscriptionHeadersShowUsageAndExpiry(t *testing.T) {
 	}
 	st.pool.Exec(ctx, `UPDATE users SET expires_at=NULL WHERE name=$1`, acc.Email)
 	_, _, h = c.get("/sub/" + u.SubToken)
-	if strings.Contains(h.Get("subscription-userinfo"), "expire=") {
-		t.Errorf("no end date, no expire: %q", h.Get("subscription-userinfo"))
+	if !strings.Contains(h.Get("subscription-userinfo"), "expire=0") {
+		t.Errorf("no end date means expire=0: %q", h.Get("subscription-userinfo"))
+	}
+	if a, _ := base64.StdEncoding.DecodeString(strings.TrimPrefix(h.Get("announce"), "base64:")); string(a) != "Подписка бессрочная" {
+		t.Errorf("unlimited subscription says so: %q", h.Get("announce"))
 	}
 }
