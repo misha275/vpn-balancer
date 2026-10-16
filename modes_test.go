@@ -96,7 +96,7 @@ func TestBuildConfigModes(t *testing.T) {
 			defaults[ob["tag"].(string)] = ob["default"].(string)
 		}
 	}
-	if len(defaults) != 4 || defaults["proxy-ping"] != nodes[1].Tag() || defaults["proxy"] != nodes[0].Tag() || defaults["proxy-speed"] != nodes[0].Tag() {
+	if len(defaults) != 7 || defaults["proxy-ping"] != nodes[1].Tag() || defaults["proxy"] != nodes[0].Tag() || defaults["proxy-speed"] != nodes[0].Tag() {
 		t.Fatalf("selectors: %v", defaults)
 	}
 	// every mode has its own copy of the rules, in the same order, before the common ones; "proxy" rules lead to its own selector
@@ -157,7 +157,7 @@ func modePoolChecker(t *testing.T) *Checker {
 func TestModeBestSpeedAndPing(t *testing.T) {
 	c := modePoolChecker(t)
 	now := time.Now()
-	pool := c.modePool(now)
+	pool := c.modePool(now, chanAdmin)
 	if len(pool) != 4 {
 		t.Fatalf("with few nodes the group is everything allowed: %d", len(pool))
 	}
@@ -170,7 +170,7 @@ func TestModeBestSpeedAndPing(t *testing.T) {
 	// a node that is dead is never in the group; a node excluded by country neither
 	c.st("b").score = 0
 	withExit(c.st("c").Node, "RU")
-	pool = c.modePool(now)
+	pool = c.modePool(now, chanAdmin)
 	for _, st := range pool {
 		if st.Node.Name == "b" || st.Node.Name == "c" {
 			t.Errorf("dead or censored node in the group: %s", st.Node.Name)
@@ -188,13 +188,13 @@ func TestModeBestIgnoresStaleSpeedAndSlowNodes(t *testing.T) {
 	// b was measured long ago: it does not count as the fastest any more
 	c.st("b").speedHist = []SpeedPoint{{K: 90000, T: time.Now().Add(-30 * time.Hour).Unix()}}
 	now := time.Now()
-	if b := c.modeBest(modeSpeed, c.modePool(now), now); b.Node.Name != "a" {
+	if b := c.modeBest(modeSpeed, c.modePool(now, chanAdmin), now); b.Node.Name != "a" {
 		t.Errorf("an old measurement must not win: %s", b.Node.Name)
 	}
 	// two slow measurements exclude a node from the group (the common quality rule)
 	st := c.st("a")
 	st.speedHist = []SpeedPoint{{K: 1000, T: now.Add(-time.Hour).Unix()}, {K: 1200, T: now.Unix()}}
-	for _, s := range c.modePool(now) {
+	for _, s := range c.modePool(now, chanAdmin) {
 		if s.Node.Name == "a" {
 			t.Errorf("a slow node must not be in the group")
 		}
@@ -300,7 +300,8 @@ func TestModesRouteIndependentlyInSingbox(t *testing.T) {
 	cfg.Rules = []RuleCfg{{Action: "block", Match: []string{"port:25"}}}
 	off := false
 	cfg.ExitCheck = &off
-	data, err := BuildConfig(cfg, []*Node{nA, nB}, []User{{Name: "alice", UUID: testUUID}}, "")
+	const bobUUID = "6a3a4a6c-0b1e-4b0e-9d5e-1d2f3a4b5c6d"
+	data, err := BuildConfig(cfg, []*Node{nA, nB}, []User{{Name: "alice", UUID: testUUID}, {Name: "bob", UUID: bobUUID, Channel: chanUsers}}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,8 +328,12 @@ func TestModesRouteIndependentlyInSingbox(t *testing.T) {
 		p := freePort(t)
 		ports[m] = p
 		tag := "m" + m
+		owner := testUUID // the keys of the admin channel belong to alice, those of the users' channel to bob
+		if modeChannel(m) == chanUsers {
+			owner = bobUUID
+		}
 		cin = append(cin, map[string]any{"type": "socks", "tag": "in" + tag, "listen": "127.0.0.1", "listen_port": p})
-		cout = append(cout, map[string]any{"type": "vless", "tag": "out" + tag, "server": "127.0.0.1", "server_port": gwPort, "uuid": modeUUID(testUUID, m)})
+		cout = append(cout, map[string]any{"type": "vless", "tag": "out" + tag, "server": "127.0.0.1", "server_port": gwPort, "uuid": modeUUID(owner, m)})
 		crules = append(crules, map[string]any{"inbound": []string{"in" + tag}, "outbound": "out" + tag})
 	}
 	run("client", map[string]any{"log": map[string]any{"level": "error"}, "inbounds": cin, "outbounds": cout, "route": map[string]any{"rules": crules}})
@@ -365,6 +370,18 @@ func TestModesRouteIndependentlyInSingbox(t *testing.T) {
 	sel("proxy", nB.Tag())
 	sel("proxy-speed", nA.Tag())
 	expect("each selector is independent", "B", "A", "B")
+
+	// the users' channel has selectors of its own: moving them changes nothing for the admin channel and vice versa
+	userVia := func() []string { return []string{via(modeUser0, 80), via(modeUserSpd, 80), via(modeUserPing, 80)} }
+	if got := userVia(); got[0] != "A:x" || got[1] != "A:x" || got[2] != "A:x" {
+		t.Fatalf("the users' channel starts on the first node: %v", got)
+	}
+	sel("proxy-u-speed", nB.Tag())
+	sel("proxy-u", nB.Tag())
+	if got := userVia(); got[0] != "B:x" || got[1] != "B:x" || got[2] != "A:x" {
+		t.Fatalf("users' selectors move on their own: %v", got)
+	}
+	expect("the admin channel did not move", "B", "A", "B")
 
 	// the filter applies to every mode
 	for _, m := range allModes {

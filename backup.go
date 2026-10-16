@@ -24,7 +24,7 @@ import (
 )
 
 // appVersion is written into backup names and files (kept equal to the VERSION file; a test checks it).
-const appVersion = "3.7.0"
+const appVersion = "3.8.0"
 
 const (
 	backupFormat   = "vpnb-backup"
@@ -38,13 +38,13 @@ const (
 var backupTables = []string{
 	"plans", "ext_sources", "users", "accounts", "payments", "custom_nodes", "bundles", "bundle_nodes",
 	"bundle_sources", "wg_server", "wg_peers", "traffic_hourly", "user_seen", "forum_topics", "forum_posts", "forum_files",
-	"site_pages", "servers", "server_traffic", "settings",
+	"site_pages", "servers", "server_traffic", "server_traffic_hourly", "balance_ops", "promos", "promo_uses", "settings",
 }
 
 // backupBigTable is not put into a backup when it is larger than the limit (attachments of the forum may be gigabytes).
 const backupFilesLimit = 256 << 20
 
-var backupSerial = []string{"plans", "ext_sources", "users", "accounts", "payments", "custom_nodes", "bundles", "forum_topics", "forum_posts", "forum_files", "servers"}
+var backupSerial = []string{"plans", "ext_sources", "users", "accounts", "payments", "custom_nodes", "bundles", "forum_topics", "forum_posts", "forum_files", "servers", "balance_ops"}
 
 type backupFile struct {
 	Format  string                     `json:"format"`

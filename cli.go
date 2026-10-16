@@ -43,6 +43,8 @@ WireGuard (роутер MikroTik и другие устройства подкл
 
 Пользователи
   users                       список пользователей и их ссылки
+  nick ИМЯ НИК                сменить ник (имя и номер пользователя не меняются)
+  channel ИМЯ admin|users     канал балансировщика пользователя (users — свой пул узлов, users_subscriptions)
   adduser ИМЯ                 создать (печатает ссылку на балансировщик и адрес подписки)
   deluser ИМЯ                 отключить (можно включить обратно)
   rmuser ИМЯ                  удалить навсегда (ссылка перестаёт работать, статистика стирается)
@@ -463,6 +465,22 @@ func runCLI(ctx context.Context, cfg *Config, st *Store, cmd string, args []stri
 		return true, cliCountries(ctx, cfg, st, args)
 	case "subs":
 		return true, cliSubs(ctx, cfg, st, args)
+	case "nick":
+		if len(args) < 2 {
+			return true, fmt.Errorf("usage: nick ИМЯ НОВЫЙ-НИК")
+		}
+		if _, err := cliCall(ctx, cfg, st, "POST", "/api/users/"+url.PathEscape(args[0])+"/nick", map[string]string{"nick": strings.Join(args[1:], " ")}); err != nil {
+			return true, err
+		}
+		fmt.Println("готово")
+	case "channel":
+		if len(args) != 2 {
+			return true, fmt.Errorf("usage: channel ИМЯ admin|users")
+		}
+		if _, err := cliCall(ctx, cfg, st, "POST", "/api/users/"+url.PathEscape(args[0])+"/channel", map[string]string{"channel": args[1]}); err != nil {
+			return true, err
+		}
+		fmt.Println("готово")
 	case "block", "unblock":
 		if len(args) < 1 || (cmd == "block" && len(args) < 2) {
 			return true, fmt.Errorf("usage: block ИМЯ unpaid|ban|other [причина]  |  unblock ИМЯ")

@@ -256,6 +256,7 @@ func TestUserStatsOf(t *testing.T) {
 func TestAdminSubsAPI(t *testing.T) {
 	st, cfg := subsStore(t)
 	ctx := context.Background()
+	st.pool.Exec(ctx, "TRUNCATE servers CASCADE") // registered servers appear in the catalog as s:<id>
 	st.AddUser(ctx, "carol")
 	a := NewAPI(cfg, st, nil, nil, "tok", make(chan struct{}, 1))
 	mux := http.NewServeMux()

@@ -13,13 +13,16 @@ const (
 	subAll       = "all"       // balancers + every allowed server of the pool (+ the servers registered in the panel)
 	subServers   = "servers"   // end nodes registered in the panel (installer --mode end-node)
 	bundlePrefix = "b:"
+	serverPrefix = "s:" // one registered server: "s:<id>"
 )
+
+var reServerKey = regexp.MustCompile(`^s:[0-9]{1,9}$`)
 
 var reSlug = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`)
 
 // validSubKey checks the shape of a key (the bundle itself may have been deleted since).
 func validSubKey(k string) bool {
-	return k == subBalancers || k == subAll || k == subServers || (strings.HasPrefix(k, bundlePrefix) && reSlug.MatchString(k[len(bundlePrefix):]))
+	return k == subBalancers || k == subAll || k == subServers || reServerKey.MatchString(k) || (strings.HasPrefix(k, bundlePrefix) && reSlug.MatchString(k[len(bundlePrefix):]))
 }
 
 // cleanSubKeys validates and de-duplicates a list of keys, keeping the order.
@@ -29,7 +32,7 @@ func cleanSubKeys(in []string) ([]string, error) {
 	for _, k := range in {
 		k = strings.TrimSpace(k)
 		if !validSubKey(k) {
-			return nil, fmt.Errorf("неверный ключ подписки %q (нужно balancers, servers, all или b:имя-категории)", k)
+			return nil, fmt.Errorf("неверный ключ подписки %q (нужно balancers, servers, all, s:номер-сервера или b:имя-категории)", k)
 		}
 		if !seen[k] {
 			seen[k] = true

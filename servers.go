@@ -182,14 +182,35 @@ func (s *Store) SaveServerReport(ctx context.Context, id int64, rep SyncReport) 
 	if len(rep.Traffic) == 0 {
 		return nil
 	}
+	old := map[string][2]int64{}
+	if rows, err := s.pool.Query(ctx, `SELECT user_name, up, down FROM server_traffic WHERE server_id=$1`, id); err == nil {
+		for rows.Next() {
+			var n string
+			var o [2]int64
+			if rows.Scan(&n, &o[0], &o[1]) == nil {
+				old[n] = o
+			}
+		}
+		rows.Close()
+	}
+	hour := time.Now().UTC().Truncate(time.Hour)
 	b := &pgx.Batch{}
 	n := 0
 	for u, t := range rep.Traffic {
-		if n++; n > 20000 || t[0] < 0 || t[1] < 0 {
+		if n++; n > 20000 || t[0] < 0 || t[1] < 0 || len(u) > 200 {
 			continue
 		}
 		b.Queue(`INSERT INTO server_traffic(server_id,user_name,up,down) VALUES($1,$2,$3,$4)
 			ON CONFLICT (server_id,user_name) DO UPDATE SET up=EXCLUDED.up, down=EXCLUDED.down`, id, u, t[0], t[1])
+		// the growth since the last report goes into the hour of this report (a counter that went down = the server started over)
+		du, dd := t[0]-old[u][0], t[1]-old[u][1]
+		if du < 0 || dd < 0 {
+			du, dd = t[0], t[1]
+		}
+		if du > 0 || dd > 0 {
+			b.Queue(`INSERT INTO server_traffic_hourly(server_id,hour,user_name,up,down) VALUES($1,$2,$3,$4,$5)
+				ON CONFLICT (server_id,hour,user_name) DO UPDATE SET up=server_traffic_hourly.up+EXCLUDED.up, down=server_traffic_hourly.down+EXCLUDED.down`, id, hour, u, du, dd)
+		}
 	}
 	br := s.pool.SendBatch(ctx, b)
 	defer br.Close()
@@ -207,25 +228,35 @@ type SyncUser struct {
 	UUID     string     `json:"uuid"`
 	SubToken string     `json:"sub_token"`
 	Expires  *time.Time `json:"expires,omitempty"`
+	Channel  string     `json:"channel,omitempty"`
 }
 
-// userMayUseServer says whether a user's subscriptions give access to a kind of remote server.
-func userMayUseServer(cfg *Config, u User, kind string, now time.Time) bool {
+// userMayUseServer says whether a user's subscriptions give access to a registered server: everything ("all"), every server of
+// its kind ("balancers" / "servers") or this one server ("s:<id>").
+func userMayUseServer(cfg *Config, u User, sv RemoteServer, now time.Time) bool {
 	if !u.Active(now) {
 		return false
 	}
-	keys, _ := effectiveSubs(cfg, u)
-	if hasSub(keys, subAll) {
+	return keysGiveServer(effectiveKeys(cfg, u), sv)
+}
+
+func effectiveKeys(cfg *Config, u User) []string {
+	k, _ := effectiveSubs(cfg, u)
+	return k
+}
+
+func keysGiveServer(keys []string, sv RemoteServer) bool {
+	if hasSub(keys, subAll) || hasSub(keys, fmt.Sprintf("%s%d", serverPrefix, sv.ID)) {
 		return true
 	}
-	if kind == "balancer" {
+	if sv.Kind == "balancer" {
 		return hasSub(keys, subBalancers)
 	}
 	return hasSub(keys, subServers)
 }
 
-// SyncUsersFor lists the users who may use a server of the given kind.
-func (s *Store) SyncUsersFor(ctx context.Context, cfg *Config, kind string) ([]SyncUser, error) {
+// SyncUsersFor lists the users who may use a server.
+func (s *Store) SyncUsersFor(ctx context.Context, cfg *Config, sv RemoteServer) ([]SyncUser, error) {
 	us, err := s.ListUsers(ctx)
 	if err != nil {
 		return nil, err
@@ -233,8 +264,8 @@ func (s *Store) SyncUsersFor(ctx context.Context, cfg *Config, kind string) ([]S
 	now := time.Now()
 	out := []SyncUser{}
 	for _, u := range us {
-		if userMayUseServer(cfg, u, kind, now) {
-			out = append(out, SyncUser{u.Name, u.UUID, u.SubToken, u.Expires})
+		if userMayUseServer(cfg, u, sv, now) {
+			out = append(out, SyncUser{u.Name, u.UUID, u.SubToken, u.Expires, u.Chan()})
 		}
 	}
 	return out, nil
@@ -300,17 +331,27 @@ func fillTemplate(t LinkTmpl, kind string, u User, name string) (string, bool) {
 	return l + "#" + url.PathEscape(name), true
 }
 
-// remoteLinks are the links of the registered servers of one kind for a user (kind "" = both).
-func (c *Config) remoteLinks(u User, kind string) []string {
+// remoteLinks are the links of the registered servers of one kind for a user (kind "" = both): only those his
+// subscriptions give. onlyID > 0 limits the answer to one server (the subscription "s:<id>").
+func (c *Config) remoteLinks(u User, kind string) []string { return c.remoteLinksFor(u, kind, 0) }
+
+func (c *Config) remoteLinksFor(u User, kind string, onlyID int64) []string {
 	c.mu.RLock()
 	list := c.remote
 	c.mu.RUnlock()
+	keys := effectiveKeys(c, u)
 	var out []string
 	for _, sv := range list {
-		if !sv.Enabled || sv.LastSeen == nil || (kind != "" && sv.Kind != kind) {
+		if !sv.Enabled || sv.LastSeen == nil || (kind != "" && sv.Kind != kind) || (onlyID > 0 && sv.ID != onlyID) {
+			continue
+		}
+		if !keysGiveServer(keys, sv) {
 			continue
 		}
 		for _, t := range sv.Info.Links {
+			if sv.Kind == "balancer" && modeChannel(t.Mode) != u.Chan() {
+				continue // the links of the other channel's modes are not for this user
+			}
 			name := sv.Name
 			if t.Title != "" {
 				name += " · " + t.Title
@@ -371,7 +412,7 @@ func (s *Site) syncHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "temporary error", http.StatusServiceUnavailable)
 		return
 	}
-	users, err := s.st.SyncUsersFor(ctx, s.cfg, sv.Kind)
+	users, err := s.st.SyncUsersFor(ctx, s.cfg, *sv)
 	if err != nil {
 		http.Error(w, "temporary error", http.StatusServiceUnavailable)
 		return
@@ -479,4 +520,37 @@ func (a *API) serverDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	go a.store.RefreshRemote(context.Background(), a.cfg)
 	writeJSON(w, 200, map[string]string{"ok": "готово"})
+}
+
+// ServerUsage is the traffic that went through one server (ID 0 = the server the panel runs on).
+type ServerUsage struct {
+	ID    int64  `json:"id"`
+	Name  string `json:"name"`
+	Kind  string `json:"kind"`
+	Up    int64  `json:"up"`
+	Down  int64  `json:"down"`
+	D30Up int64  `json:"d30_up"`
+	D30Dn int64  `json:"d30_down"`
+}
+
+// TrafficByServer sums the traffic per server: of one user (name != "") or of everybody.
+func (s *Store) TrafficByServer(ctx context.Context, name string) ([]ServerUsage, error) {
+	rows, err := s.pool.Query(ctx, `SELECT t.server_id, COALESCE(sv.name, CASE WHEN t.server_id=0 THEN 'Этот сервер' ELSE 'удалённый сервер' END),
+		COALESCE(sv.kind,''), SUM(t.up)::bigint, SUM(t.down)::bigint,
+		COALESCE(SUM(t.up) FILTER (WHERE t.hour > now()-interval '30 days'),0)::bigint, COALESCE(SUM(t.down) FILTER (WHERE t.hour > now()-interval '30 days'),0)::bigint
+		FROM traffic_all t LEFT JOIN servers sv ON sv.id=t.server_id
+		WHERE ($1='' OR t.user_name=$1) GROUP BY t.server_id, sv.name, sv.kind ORDER BY t.server_id`, name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ServerUsage{}
+	for rows.Next() {
+		var u ServerUsage
+		if err := rows.Scan(&u.ID, &u.Name, &u.Kind, &u.Up, &u.Down, &u.D30Up, &u.D30Dn); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
 }

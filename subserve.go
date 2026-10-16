@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -62,25 +63,13 @@ func subUserinfo(tr UserTraffic, u *User) string {
 	return s
 }
 
-// titleWithStats adds the usage and the end date to the name of the subscription: every client shows the name, so the
-// numbers are visible even in apps that ignore the subscription-userinfo header.
-func titleWithStats(cfg *Config, title string, tr UserTraffic, u *User) string {
-	if !cfg.subTitleStats() {
-		return title
-	}
-	title += fmt.Sprintf(" · ↓%s ↑%s", fmtBytesRu(tr.AllDown), fmtBytesRu(tr.AllUp))
-	if u.Expires != nil {
-		title += " · до " + u.Expires.Format("02.01.2006")
-	} else {
-		title += " · без срока"
-	}
-	return title
-}
-
-func (c *Config) subTitleStats() bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.SubTitleStats == nil || *c.SubTitleStats
+// subTitle3 is the name of the subscription in the app: the name of the VPN from the panel, a dot with spaces, the nick.
+// Usage and the end date are not in the name: the apps show them in the traffic line (subscription-userinfo).
+func subTitle3(cfg *Config, u *User) string {
+	cfg.mu.RLock()
+	name := cfg.SiteName
+	cfg.mu.RUnlock()
+	return name + " · " + u.DisplayNick()
 }
 
 // RenderBalancers is the subscription "balancers only": one link per mode.
@@ -97,7 +86,7 @@ func RenderBalancers(cfg *Config, u *User) []string {
 func RenderSub(cfg *Config, u *User, nodes []*Node) []string {
 	lines := RenderBalancers(cfg, u)
 	var ns []*Node
-	for _, n := range nodes {
+	for _, n := range channelNodes(nodes, u.Chan()) {
 		if n.Allowed(cfg) {
 			ns = append(ns, n)
 		}
@@ -182,7 +171,7 @@ func (s *SubServer) Handler() http.Handler {
 				return
 			}
 			keys, _ := effectiveSubs(s.cfg, *u)
-			title := s.cfg.getGatewayName()
+			title := subTitle3(s.cfg, u)
 			ix, err := s.store.LoadSubIndex(ctx)
 			if err != nil {
 				log.Printf("sub: index: %v", err)
@@ -198,6 +187,9 @@ func (s *SubServer) Handler() http.Handler {
 					lines = append(lines, RenderBalancers(s.cfg, u)...)
 				case kind == subServers:
 					lines = append(lines, s.cfg.remoteLinks(*u, "endnode")...)
+				case reServerKey.MatchString(kind):
+					id, _ := strconv.ParseInt(kind[len(serverPrefix):], 10, 64)
+					lines = append(lines, s.cfg.remoteLinksFor(*u, "", id)...)
 				case kind == subAll:
 					nodes, err := s.store.ActiveNodes(ctx, s.cfg.NodeGrace)
 					if err != nil {
@@ -212,9 +204,7 @@ func (s *SubServer) Handler() http.Handler {
 						break
 					}
 					lines = append(lines, ls...)
-					if want == "bundle" {
-						title += " · " + name
-					}
+					_ = name
 				}
 				return true
 			}
@@ -231,15 +221,12 @@ func (s *SubServer) Handler() http.Handler {
 				if want == "bundle" {
 					key = bundlePrefix + r.PathValue("slug")
 				}
+				if want == "server" {
+					key = serverPrefix + r.PathValue("id")
+				}
 				if !hasSub(keys, key) {
 					http.Error(w, "this subscription is not available for the account", http.StatusForbidden)
 					return
-				}
-				if key == subBalancers {
-					title += " · балансировщики"
-				}
-				if key == subServers {
-					title += " · серверы"
 				}
 				if !add(key) {
 					http.Error(w, "temporary error", http.StatusServiceUnavailable)
@@ -252,7 +239,6 @@ func (s *SubServer) Handler() http.Handler {
 			}
 			go s.store.NoteSubFetch(context.Background(), u.ID)
 			tr, _ := s.store.UserUsage(ctx, u.Name)
-			title = titleWithStats(s.cfg, title, tr, u)
 			w.Header().Set("subscription-userinfo", subUserinfo(tr, u))
 			body := strings.Join(dedupe(lines), "\n")
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -270,6 +256,7 @@ func (s *SubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /sub/{token}/all", serve(subAll))
 	mux.HandleFunc("GET /sub/{token}/balancers", serve(subBalancers))
 	mux.HandleFunc("GET /sub/{token}/servers", serve(subServers))
+	mux.HandleFunc("GET /sub/{token}/s/{id}", serve("server"))
 	mux.HandleFunc("GET /sub/{token}/b/{slug}", serve("bundle"))
 	return mux
 }

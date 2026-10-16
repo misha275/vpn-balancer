@@ -65,6 +65,7 @@ func (c *Config) getSiteReady() bool {
 }
 
 var reDomain = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
+var reBotToken = regexp.MustCompile(`^[0-9]{3,20}:[A-Za-z0-9_-]{20,80}$`)
 var reEmail = regexp.MustCompile(`^[^@\s~]{1,64}@[^@\s~]{1,255}\.[^@\s~]{2,24}$`)
 
 func validDomain(d string) bool { return len(d) <= 253 && reDomain.MatchString(d) }

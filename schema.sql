@@ -260,6 +260,22 @@ CREATE TABLE IF NOT EXISTS server_traffic (
     PRIMARY KEY (server_id, user_name)
 );
 
+-- The same traffic by hour (the panel computes it from the growth of the totals a server reports), so that the statistics of
+-- all servers add up in one place. traffic_all is this server (server_id 0) plus the servers of the network.
+CREATE TABLE IF NOT EXISTS server_traffic_hourly (
+    server_id BIGINT NOT NULL,
+    hour      TIMESTAMPTZ NOT NULL,
+    user_name TEXT NOT NULL,
+    up        BIGINT NOT NULL DEFAULT 0,
+    down      BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (server_id, hour, user_name)
+);
+CREATE INDEX IF NOT EXISTS server_traffic_hourly_user ON server_traffic_hourly (user_name, hour);
+CREATE OR REPLACE VIEW traffic_all AS
+    SELECT 0::bigint AS server_id, hour, user_name, up, down, conns FROM traffic_hourly
+    UNION ALL
+    SELECT server_id, hour, user_name, up, down, 0::bigint FROM server_traffic_hourly;
+
 -- Pictures and files attached to forum messages (forum_files.go).
 CREATE TABLE IF NOT EXISTS forum_files (
     id      BIGSERIAL PRIMARY KEY,
@@ -285,4 +301,55 @@ CREATE TABLE IF NOT EXISTS site_pages (
     updated   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+ALTER TABLE users ADD COLUMN IF NOT EXISTS nick TEXT NOT NULL DEFAULT '';
+-- the channel of the balancer a user belongs to: 'admin' (the operator's pool) or 'users' (the pool of the service's people)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS channel TEXT NOT NULL DEFAULT 'admin';
+-- in which pools a node was seen (by the subscription lists of the two channels)
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS seen_admin TIMESTAMPTZ;
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS seen_users TIMESTAMPTZ;
+UPDATE nodes SET seen_admin=last_seen WHERE seen_admin IS NULL AND seen_users IS NULL;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS synced BOOLEAN NOT NULL DEFAULT false;
+
+-- Service: balance, referrals, promo codes, links of accounts with Telegram (service_store.go).
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS balance_cents BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS ref_code TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS accounts_ref_code ON accounts (ref_code) WHERE ref_code IS NOT NULL;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS referred_by BIGINT;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS ref_rewarded BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS tg_chat BIGINT;
+CREATE UNIQUE INDEX IF NOT EXISTS accounts_tg_chat ON accounts (tg_chat) WHERE tg_chat IS NOT NULL;
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'plan'; -- plan | topup
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS promo_code TEXT NOT NULL DEFAULT '';
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS ext_id TEXT NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS balance_ops (
+    id          BIGSERIAL PRIMARY KEY,
+    account_id  BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    delta_cents BIGINT NOT NULL DEFAULT 0,
+    kind        TEXT NOT NULL,              -- topup | purchase | referral | referral_days | promo | admin | refund
+    note        TEXT NOT NULL DEFAULT '',
+    payment_id  BIGINT,
+    created     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS balance_ops_account ON balance_ops (account_id, created DESC);
+CREATE TABLE IF NOT EXISTS promos (
+    code     TEXT PRIMARY KEY,
+    kind     TEXT NOT NULL,                 -- percent (discount on a payment) | days (bonus days) | balance (money on the balance)
+    value    INT NOT NULL,
+    max_uses INT NOT NULL DEFAULT 0,        -- 0 = no limit
+    used     INT NOT NULL DEFAULT 0,
+    expires  TIMESTAMPTZ,
+    enabled  BOOLEAN NOT NULL DEFAULT true,
+    note     TEXT NOT NULL DEFAULT '',
+    created  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS promo_uses (
+    code       TEXT NOT NULL REFERENCES promos(code) ON DELETE CASCADE,
+    account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    created    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (code, account_id)
+);
+CREATE TABLE IF NOT EXISTS tg_links (
+    code       TEXT PRIMARY KEY,
+    account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    created    TIMESTAMPTZ NOT NULL DEFAULT now()
+);

@@ -30,6 +30,21 @@ func (c *Config) getSubscriptions() []string {
 	defer c.mu.RUnlock()
 	return append([]string(nil), c.Subscriptions...)
 }
+func (c *Config) getUsersSubscriptions() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return append([]string(nil), c.UsersSubscriptions...)
+}
+
+// getSiteChannel is the channel of the balancer for the people who register on the site (default: the users' channel).
+func (c *Config) getSiteChannel() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.SiteChannel == chanAdmin {
+		return chanAdmin
+	}
+	return chanUsers
+}
 func (c *Config) getNodeIdentity() string { c.mu.RLock(); defer c.mu.RUnlock(); return c.NodeIdentity }
 func (c *Config) getGatewayName() string {
 	c.mu.RLock()
@@ -110,6 +125,24 @@ var settingDefs = []settingDef{
 			return func(c *Config) { c.Subscriptions = v }, nil
 		},
 		get: func(c *Config) any { return c.Subscriptions },
+	},
+	{
+		key:  "users_subscriptions",
+		help: "подписки для канала пользователей (свой пул узлов); пусто — канал работает на пуле админов",
+		parse: func(raw json.RawMessage) (func(*Config), error) {
+			var v []string
+			if err := json.Unmarshal(raw, &v); err != nil {
+				return nil, fmt.Errorf("users_subscriptions: нужен список строк")
+			}
+			for i := range v {
+				v[i] = strings.TrimSpace(v[i])
+			}
+			if err := httpURLs(v, "users_subscriptions", 0, 100); err != nil {
+				return nil, err
+			}
+			return func(c *Config) { c.UsersSubscriptions = v }, nil
+		},
+		get: func(c *Config) any { return append([]string{}, c.UsersSubscriptions...) },
 	},
 	{
 		key:  "blocked_exit_countries",
@@ -205,6 +238,27 @@ var settingDefs = []settingDef{
 			return func(c *Config) { c.DefaultAction = v }, nil
 		},
 		get: func(c *Config) any { return c.DefaultAction },
+	},
+	{
+		key:  "site_channel",
+		help: "канал балансировщика для людей с сайта: users (свой пул узлов, по умолчанию) или admin",
+		parse: func(raw json.RawMessage) (func(*Config), error) {
+			var v string
+			if err := json.Unmarshal(raw, &v); err != nil {
+				return nil, fmt.Errorf("site_channel: нужна строка")
+			}
+			v = strings.ToLower(strings.TrimSpace(v))
+			if v != chanAdmin && v != chanUsers {
+				return nil, fmt.Errorf("site_channel: users или admin")
+			}
+			return func(c *Config) { c.SiteChannel = v }, nil
+		},
+		get: func(c *Config) any {
+			if c.SiteChannel == chanAdmin {
+				return chanAdmin
+			}
+			return chanUsers
+		},
 	},
 	{
 		key:  "node_identity",

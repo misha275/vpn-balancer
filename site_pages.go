@@ -53,6 +53,7 @@ const siteTplText = `
 <form method="post" action="/register"><label for="email">Почта</label><input id="email" type="email" name="email" value="{{.FormEmail}}" required autocomplete="username" maxlength="120">
 <label for="pw">Пароль (от 8 символов)</label><input id="pw" type="password" name="password" required minlength="8" maxlength="72" autocomplete="new-password">
 <label for="pw2">Пароль ещё раз</label><input id="pw2" type="password" name="password2" required minlength="8" maxlength="72" autocomplete="new-password">
+{{if .Svc.Ref}}<input type="hidden" name="ref" value="{{.Svc.Ref}}"><p class="muted">Вы пришли по приглашению друга.</p>{{end}}
 <p><button class="btn">Создать аккаунт</button></p></form>
 <p class="muted">Уже есть аккаунт? <a href="/login">Войти</a></p></div>
 {{template "foot" .}}{{end}}
@@ -70,7 +71,7 @@ const siteTplText = `
 {{if ne .Payment "off"}}<p><a class="btn sm" href="/pay">{{if eq .State "active"}}Продлить{{else}}Оплатить{{end}}</a></p>{{else if .Support}}<p class="muted">Чтобы продлить, свяжитесь с поддержкой.</p>{{end}}</div>
 <div class="card"><div class="muted">Использовано трафика</div><div class="big">{{.TrafficAll}}</div>
 <div class="muted">за 30 дней: {{.Traffic30}}</div><div class="muted">↑ {{.UpAll}} · ↓ {{.DownAll}}</div></div>
-<div class="card"><div class="muted">Аккаунт</div><div class="big" style="font-size:17px;word-break:break-all">{{.Email}}</div><div class="muted">создан {{.Created}}</div></div>
+<div class="card"><div class="muted">Аккаунт № {{.UserNo}}</div><div class="big" style="font-size:17px;word-break:break-all">{{.Nick}}</div><div class="muted">{{.Email}} · создан {{.Created}}</div></div>
 </div>
 
 <div class="card"><h2>Подключение</h2>
@@ -81,8 +82,30 @@ const siteTplText = `
 {{if not .Links}}<p class="muted">Для вашего аккаунта сейчас нет доступных подписок. Напишите в поддержку.</p>{{end}}
 {{if .Hint}}<p class="muted">{{.Hint}}</p>{{end}}</div>
 
+<div class="card"><h2>Баланс и бонусы</h2>
+<div class="row"><div><div class="muted">На балансе</div><div class="big">{{.Svc.Balance}}</div></div></div>
+{{if .Svc.CanTopup}}<form method="post" action="/pay/topup" class="row"><input type="hidden" name="csrf" value="{{.CSRF}}"><input name="amount" inputmode="decimal" placeholder="сумма, {{.Svc.Cur}}" required maxlength="12" aria-label="Сумма пополнения" style="max-width:160px"><button class="btn s sm">Пополнить</button></form>{{end}}
+<form method="post" action="/account/promo" class="row"><input type="hidden" name="csrf" value="{{.CSRF}}"><input name="promo" placeholder="промокод" required maxlength="32" aria-label="Промокод" style="max-width:200px"><button class="btn s sm">Применить</button></form>
+{{if .Svc.Ops}}<table><tr><th>Дата</th><th>Операция</th><th>Сумма</th></tr>{{range .Svc.Ops}}<tr><td>{{.Date}}</td><td>{{.Text}}</td><td class="{{.Class}}">{{.Amount}}</td></tr>{{end}}</table>{{end}}
+</div>
+
+<div class="card"><h2>Пригласить друга</h2>
+{{if .Svc.RefRule}}<p>{{.Svc.RefRule}}</p>{{else}}<p class="muted">Поделитесь ссылкой: друг зарегистрируется по ней.</p>{{end}}
+{{if .Svc.RefLink}}<div class="row"><input id="refl" readonly value="{{.Svc.RefLink}}" aria-label="Ваша ссылка-приглашение"><button class="btn s sm" type="button" data-copy="refl">Копировать</button></div>{{end}}
+<p class="muted">Приглашено: {{.Svc.RefInvited}}, оплатили: {{.Svc.RefPaid}}{{if .Svc.RefEarned}}. Вы получили: {{.Svc.RefEarned}}{{end}}</p></div>
+
+{{if .Svc.TgBot}}<div class="card"><h2>Telegram</h2>
+{{if .Svc.TgLinked}}<p class="ok">Аккаунт привязан к Telegram: в боте @{{.Svc.TgBot}} можно смотреть срок, ссылку подписки и продлевать.</p>
+<form method="post" action="/account/telegram"><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="op" value="unlink"><button class="btn s sm">Отвязать</button></form>
+{{else}}{{if .Svc.TgCode}}<p>Откройте бота <b>@{{.Svc.TgBot}}</b> и отправьте ему: <code>/start {{.Svc.TgCode}}</code> (код действует 15 минут).</p>{{else}}<p class="muted">Привяжите аккаунт к боту @{{.Svc.TgBot}}: срок, ссылка и оплата прямо в Telegram.</p>
+<form method="post" action="/account/telegram"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn s sm">Получить код привязки</button></form>{{end}}{{end}}</div>{{end}}
+
 {{if .Payments}}<div class="card"><h2>Платежи</h2><table><tr><th>Дата</th><th>Тариф</th><th>Сумма</th><th>Статус</th></tr>
 {{range .Payments}}<tr><td>{{.Date}}</td><td>{{.Plan}}</td><td>{{.Amount}}</td><td class="{{.Class}}">{{.Status}}</td></tr>{{end}}</table></div>{{end}}
+
+<div class="card"><h2>Ник</h2><form method="post" action="/account/nick"><input type="hidden" name="csrf" value="{{.CSRF}}">
+<label for="nick">Как вас называть (виден в названии подписки в приложении)</label><input id="nick" name="nick" value="{{.Nick}}" required maxlength="32">
+<p><button class="btn s">Сохранить ник</button></p></form></div>
 
 <div class="card"><h2>Смена пароля</h2><form method="post" action="/account/password"><input type="hidden" name="csrf" value="{{.CSRF}}">
 <label for="old">Текущий пароль</label><input id="old" type="password" name="old" required autocomplete="current-password" maxlength="72">
@@ -96,7 +119,10 @@ const siteTplText = `
 {{else if eq .Payment "manual"}}<div class="note">Онлайн-оплата пока не подключена. После заявки администратор подтвердит оплату вручную, срок продлится сразу после подтверждения.</div>{{end}}
 {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
 {{if .Plans}}<div class="grid">{{range .Plans}}<form method="post" action="/pay" class="card plan"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="plan" value="{{.ID}}">
-<div>{{.Name}}</div><div class="price">{{.Price}}</div><div class="muted">{{.Days}} дн.</div>{{if .Has}}<div class="muted" style="font-size:13px;margin:6px 0">{{range $i, $h := .Has}}{{if $i}}, {{end}}{{$h}}{{end}}</div>{{end}}<button class="btn">{{if eq $.Payment "stub_auto"}}Оплатить (тест){{else}}Оставить заявку{{end}}</button></form>{{end}}</div>
+<div>{{.Name}}</div><div class="price">{{.Price}}</div><div class="muted">{{.Days}} дн.</div>{{if .Has}}<div class="muted" style="font-size:13px;margin:6px 0">{{range $i, $h := .Has}}{{if $i}}, {{end}}{{$h}}{{end}}</div>{{end}}
+<input name="promo" placeholder="промокод (скидка)" maxlength="32" aria-label="Промокод" style="margin:6px 0">
+{{if ne $.Payment "off"}}<button class="btn">{{if eq $.Payment "stub_auto"}}Оплатить (тест){{else}}Оставить заявку{{end}}</button>{{end}}
+{{if $.Svc.HasBalance}}<label class="muted" style="display:block;margin-top:6px"><input type="checkbox" name="use_balance" value="1" style="width:auto"> оплатить с баланса ({{$.Svc.Balance}})</label>{{if eq $.Payment "off"}}<button class="btn" name="use_balance" value="1">Оплатить с баланса</button>{{end}}{{end}}</form>{{end}}</div>
 {{else}}<div class="card">Тарифы ещё не настроены.</div>{{end}}
 <p><a href="/cabinet">← В кабинет</a></p>
 {{template "foot" .}}{{end}}

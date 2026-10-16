@@ -334,7 +334,7 @@ func (s *Store) UserStatsOf(ctx context.Context, name string, now time.Time) (*U
 		st.Days = append(st.Days, DayStat{Day: d})
 		byDay[d] = &st.Days[len(st.Days)-1]
 	}
-	rows, err := s.pool.Query(ctx, `SELECT (hour AT TIME ZONE 'UTC')::date::text, SUM(up), SUM(down), SUM(conns) FROM traffic_hourly WHERE user_name=$1 AND hour >= $2 GROUP BY 1`, name, start)
+	rows, err := s.pool.Query(ctx, `SELECT (hour AT TIME ZONE 'UTC')::date::text, SUM(up), SUM(down), SUM(conns) FROM traffic_all WHERE user_name=$1 AND hour >= $2 GROUP BY 1`, name, start)
 	if err != nil {
 		return nil, err
 	}
@@ -368,7 +368,7 @@ func (s *Store) UserStatsOf(ctx context.Context, name string, now time.Time) (*U
 		st.Hours = append(st.Hours, HourStat{T: t.Unix()})
 		byHour[t.Unix()] = &st.Hours[len(st.Hours)-1]
 	}
-	hr, err := s.pool.Query(ctx, `SELECT hour, up, down FROM traffic_hourly WHERE user_name=$1 AND hour >= $2`, name, h0)
+	hr, err := s.pool.Query(ctx, `SELECT hour, up, down FROM traffic_all WHERE user_name=$1 AND hour >= $2`, name, h0)
 	if err != nil {
 		return nil, err
 	}
@@ -380,12 +380,12 @@ func (s *Store) UserStatsOf(ctx context.Context, name string, now time.Time) (*U
 			return nil, err
 		}
 		if x := byHour[t.Unix()]; x != nil {
-			x.Up, x.Down = up, down
+			x.Up, x.Down = x.Up+up, x.Down+down
 		}
 	}
 	hr.Close()
 	var first, last *time.Time
-	if err := s.pool.QueryRow(ctx, `SELECT COALESCE(SUM(up),0), COALESCE(SUM(down),0), COALESCE(SUM(conns),0), MIN(hour) FROM traffic_hourly WHERE user_name=$1`, name).
+	if err := s.pool.QueryRow(ctx, `SELECT COALESCE(SUM(up),0), COALESCE(SUM(down),0), COALESCE(SUM(conns),0), MIN(hour) FROM traffic_all WHERE user_name=$1`, name).
 		Scan(&st.AllUp, &st.AllDown, &st.AllConns, &first); err != nil {
 		return nil, err
 	}
@@ -403,7 +403,7 @@ func (s *Store) UserStatsOf(ctx context.Context, name string, now time.Time) (*U
 		st.LastIP = *ip
 	}
 	var bh *int
-	_ = s.pool.QueryRow(ctx, `SELECT extract(hour from hour AT TIME ZONE 'UTC')::int FROM traffic_hourly WHERE user_name=$1 AND hour >= $2
+	_ = s.pool.QueryRow(ctx, `SELECT extract(hour from hour AT TIME ZONE 'UTC')::int FROM traffic_all WHERE user_name=$1 AND hour >= $2
 		GROUP BY 1 ORDER BY SUM(up+down) DESC LIMIT 1`, name, start).Scan(&bh)
 	if bh != nil {
 		st.BusiestHr = *bh

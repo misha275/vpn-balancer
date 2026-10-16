@@ -120,6 +120,7 @@ type Site struct {
 }
 
 func NewSite(cfg *Config, st *Store) *Site {
+	rewardSource = cfg.refReward
 	h, _ := bcrypt.GenerateFromPassword([]byte("dummy-password-for-timing"), bcrypt.DefaultCost)
 	return &Site{cfg: cfg, st: st, subs: NewSubServer(cfg, st), secret: []byte(derive(cfg.Reality.PrivateKey+cfg.TestSecret, "site-csrf")),
 		loginIP: newLimiter(15, 10*time.Minute), loginMail: newLimiter(6, 10*time.Minute), regIP: newLimiter(6, time.Hour), payAcc: newLimiter(10, time.Hour), forumLimit: newLimiter(10, 15*time.Minute), dummyHash: h}
@@ -206,6 +207,8 @@ type pageData struct {
 	Title, Site, Support string
 	Nonce                string
 	Email, CSRF          string
+	Nick                 string
+	UserNo               int64
 	CanRegister          bool
 	Trial                string
 	Error, Flash         string
@@ -230,6 +233,7 @@ type pageData struct {
 	Hint                                        string
 	Payments                                    []payItem
 	Heading, Message, PayID, PayPlan, PayAmount string
+	Svc                                         svcData
 }
 
 type planView struct {
@@ -295,6 +299,11 @@ func (s *Site) planViews(ctx context.Context) []planView {
 			names[bundlePrefix+b.Slug] = b.Name
 		}
 	}
+	if svs, err := s.st.ListServers(ctx); err == nil {
+		for _, sv := range svs {
+			names[fmt.Sprintf("%s%d", serverPrefix, sv.ID)] = "сервер " + sv.Name
+		}
+	}
 	out := make([]planView, 0, len(ps))
 	for _, p := range ps {
 		keys := p.Subs
@@ -333,6 +342,12 @@ func (s *Site) Handler() http.Handler {
 	mux.HandleFunc("POST /logout", s.logout)
 	mux.HandleFunc("GET /cabinet", s.cabinet)
 	mux.HandleFunc("POST /account/password", s.changePassword)
+	mux.HandleFunc("POST /account/nick", s.changeNick)
+	mux.HandleFunc("POST /account/promo", s.redeemPromo)
+	mux.HandleFunc("POST /account/telegram", s.tgLinkPost)
+	mux.HandleFunc("POST /pay/topup", s.topupPost)
+	mux.HandleFunc("POST /pay/webhook/{provider}", s.payWebhook)
+	mux.HandleFunc("GET /r/{code}", s.refRedirect)
 	mux.HandleFunc("GET /pay", s.payPage)
 	mux.HandleFunc("POST /pay", s.payPost)
 	mux.HandleFunc("GET /pay/{id}", s.payStatus)
@@ -448,6 +463,9 @@ func (s *Site) registerPage(w http.ResponseWriter, r *http.Request) {
 		s.render(w, 200, "closed", d)
 		return
 	}
+	if c := r.URL.Query().Get("ref"); reRefCode.MatchString(c) {
+		d.Svc.Ref = c
+	}
 	s.render(w, 200, "register", d)
 }
 
@@ -473,6 +491,7 @@ func (s *Site) registerPost(w http.ResponseWriter, r *http.Request) {
 		d.Error = msg
 		s.render(w, code, "register", d)
 	}
+	defer func() { d.Svc.Ref = "" }()
 	if !sameOrigin(r) {
 		fail(403, "Запрос отклонён. Откройте страницу регистрации заново")
 		return
@@ -483,6 +502,9 @@ func (s *Site) registerPost(w http.ResponseWriter, r *http.Request) {
 	}
 	email, p1, p2 := normEmail(r.PostForm.Get("email")), r.PostForm.Get("password"), r.PostForm.Get("password2")
 	d.FormEmail = email
+	if c := r.PostForm.Get("ref"); reRefCode.MatchString(c) {
+		d.Svc.Ref = c
+	}
 	ip := clientIP(r)
 	if s.regIP.blocked(ip) {
 		fail(429, "Слишком много регистраций с этого адреса. Попробуйте позже")
@@ -506,7 +528,7 @@ func (s *Site) registerPost(w http.ResponseWriter, r *http.Request) {
 		fail(500, "Временная ошибка, попробуйте ещё раз")
 		return
 	}
-	acc, err := s.st.CreateAccount(r.Context(), email, string(hash), s.cfg.getSite().TrialDays)
+	acc, err := s.st.CreateAccountIn(r.Context(), email, string(hash), s.cfg.getSite().TrialDays, s.cfg.getSiteChannel())
 	if errors.Is(err, ErrEmailTaken) {
 		fail(409, "Этот адрес уже зарегистрирован. Попробуйте войти")
 		return
@@ -515,6 +537,9 @@ func (s *Site) registerPost(w http.ResponseWriter, r *http.Request) {
 		log.Printf("site: register: %v", err)
 		fail(500, "Временная ошибка, попробуйте ещё раз")
 		return
+	}
+	if d.Svc.Ref != "" {
+		s.st.AttachReferral(r.Context(), acc.ID, d.Svc.Ref)
 	}
 	if err := s.startSession(w, r, acc); err != nil {
 		log.Printf("site: session: %v", err)
@@ -593,11 +618,13 @@ func (s *Site) cabinetData(r *http.Request, acc *Account, h string) pageData {
 		d.Until = fmtDateRu(*acc.Expires)
 	}
 	d.Created = acc.Created.UTC().Format("02.01.2006")
+	d.Nick, d.UserNo = acc.User().DisplayNick(), acc.UserID
 	if t, err := s.st.UserTrafficOf(r.Context(), acc.UserName); err == nil {
 		d.TrafficAll, d.Traffic30 = fmtBytesRu(t.AllUp+t.AllDown), fmtBytesRu(t.D30Up+t.D30Down)
 		d.UpAll, d.DownAll = fmtBytesRu(t.AllUp), fmtBytesRu(t.AllDown)
 	}
 	d.Links = s.accountLinks(r, acc)
+	d.Svc = s.serviceData(r, acc)
 	d.BlockKind, d.BlockReason = acc.BlockKind, acc.BlockReason
 	if d.State == "expired" {
 		d.Hint = "Пока подписка не продлена, ссылки не работают. После продления они заработают снова (обновите подписку в приложении)."
@@ -632,6 +659,8 @@ func (s *Site) cabinet(w http.ResponseWriter, r *http.Request) {
 		} else {
 			d.Flash = "Аккаунт создан. Чтобы начать, оплатите подписку."
 		}
+	case r.URL.Query().Get("msg") == "nick":
+		d.Flash = "Ник изменён. Название подписки в приложении обновится при её обновлении."
 	case r.URL.Query().Get("msg") == "pw":
 		d.Flash = "Пароль изменён, остальные сеансы завершены."
 	}
@@ -671,6 +700,24 @@ func (s *Site) changePassword(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/cabinet?msg=pw", http.StatusSeeOther)
 }
 
+func (s *Site) changeNick(w http.ResponseWriter, r *http.Request) {
+	acc, h := s.authedPost(w, r)
+	if acc == nil {
+		return
+	}
+	nick, err := CleanNick(r.PostForm.Get("nick"))
+	if err == nil {
+		err = s.st.SetNick(r.Context(), acc.UserName, nick)
+	}
+	if err != nil {
+		d := s.cabinetData(r, acc, h)
+		d.Error = err.Error()
+		s.render(w, 400, "cabinet", d)
+		return
+	}
+	http.Redirect(w, r, "/cabinet?msg=nick", http.StatusSeeOther)
+}
+
 // ---- payment ----
 
 func (s *Site) payPage(w http.ResponseWriter, r *http.Request) {
@@ -679,7 +726,12 @@ func (s *Site) payPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d := s.base(r, acc, h, "Оплата")
-	if d.Payment == "off" {
+	if fresh, err := s.st.AccountByID(r.Context(), acc.ID); err == nil {
+		acc = fresh
+	}
+	d.Svc.Cur = s.siteCurrency(r.Context())
+	d.Svc.Balance, d.Svc.HasBalance = fmtBalance(acc.Balance, d.Svc.Cur), acc.Balance > 0
+	if d.Payment == "off" && !d.Svc.HasBalance {
 		d.Error = "Онлайн-оплата сейчас выключена. Чтобы продлить подписку, свяжитесь с поддержкой."
 	} else {
 		d.Plans = s.planViews(r.Context())
@@ -696,10 +748,15 @@ func (s *Site) payPost(w http.ResponseWriter, r *http.Request) {
 	fail := func(code int, msg string) {
 		d.Error = msg
 		d.Plans = s.planViews(r.Context())
+		d.Svc.Cur = s.siteCurrency(r.Context())
+		if fresh, err := s.st.AccountByID(r.Context(), acc.ID); err == nil {
+			d.Svc.Balance, d.Svc.HasBalance = fmtBalance(fresh.Balance, d.Svc.Cur), fresh.Balance > 0
+		}
 		s.render(w, code, "pay", d)
 	}
+	useBalance := r.PostForm.Get("use_balance") != ""
 	prov := s.provider()
-	if prov == nil {
+	if prov == nil && !useBalance {
 		fail(403, "Онлайн-оплата сейчас выключена")
 		return
 	}
@@ -713,12 +770,35 @@ func (s *Site) payPost(w http.ResponseWriter, r *http.Request) {
 		fail(400, "Такого тарифа нет")
 		return
 	}
+	promo := r.PostForm.Get("promo")
+	if useBalance { // the money of the balance: the payment is made and confirmed at once
+		pay, err := s.st.PayFromBalance(r.Context(), acc.ID, *plan, promo)
+		if err != nil {
+			code := 400
+			if errors.Is(err, ErrNoMoney) {
+				code = 402
+			} else if !errors.Is(err, ErrNoPromo) && !errors.Is(err, ErrPromoUsed) && !errors.Is(err, ErrPromoKind) {
+				log.Printf("site: pay from balance: %v", err)
+				code, err = 500, errors.New("Временная ошибка, попробуйте ещё раз")
+			}
+			fail(code, err.Error())
+			return
+		}
+		d.Heading, d.Message = "Оплачено с баланса", "Подписка продлена."
+		d.PayID, d.PayPlan, d.PayAmount = strconv.FormatInt(pay.ID, 10), pay.PlanName, fmtMoney(pay.AmountCents, pay.Currency)
+		s.render(w, 200, "paid", d)
+		return
+	}
 	if pend, _ := s.st.ListPayments(r.Context(), "pending", acc.ID, 10); len(pend) >= 3 {
 		fail(409, "У вас уже есть неподтверждённые заявки. Дождитесь подтверждения")
 		return
 	}
 	s.payAcc.hit(acc.Email)
-	pay, err := s.st.CreatePayment(r.Context(), acc.ID, *plan, prov.Name())
+	pay, err := s.st.CreatePaymentPromo(r.Context(), acc.ID, *plan, prov.Name(), promo)
+	if errors.Is(err, ErrNoPromo) || errors.Is(err, ErrPromoUsed) || errors.Is(err, ErrNotDiscount) {
+		fail(400, err.Error())
+		return
+	}
 	if err != nil {
 		log.Printf("site: payment: %v", err)
 		fail(500, "Временная ошибка, попробуйте ещё раз")

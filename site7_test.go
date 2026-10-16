@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"image"
 	"image/color"
@@ -379,16 +380,24 @@ func TestSubscriptionHeadersShowUsageAndExpiry(t *testing.T) {
 	if !strings.HasPrefix(title, "base64:") {
 		t.Fatalf("title: %q", title)
 	}
+	raw, _ := base64.StdEncoding.DecodeString(strings.TrimPrefix(title, "base64:"))
+	if want := cfg.SiteName + " · hdr"; string(raw) != want {
+		t.Fatalf("title %q, want %q (the VPN name, a dot, the nick; no traffic in the name)", raw, want)
+	}
+	if err := st.SetNick(ctx, acc.Email, "Миша"); err != nil {
+		t.Fatal(err)
+	}
+	_, _, h = c.get("/sub/" + u.SubToken)
+	raw, _ = base64.StdEncoding.DecodeString(strings.TrimPrefix(h.Get("profile-title"), "base64:"))
+	if string(raw) != cfg.SiteName+" · Миша" {
+		t.Fatalf("title after nick change: %q", raw)
+	}
+	if st.SetNick(ctx, acc.Email, "  ") == nil || st.SetNick(ctx, acc.Email, "a<b") == nil || st.SetNick(ctx, acc.Email, strings.Repeat("я", 33)) == nil {
+		t.Error("bad nicks must be refused")
+	}
 	st.pool.Exec(ctx, `UPDATE users SET expires_at=NULL WHERE name=$1`, acc.Email)
 	_, _, h = c.get("/sub/" + u.SubToken)
 	if strings.Contains(h.Get("subscription-userinfo"), "expire=") {
 		t.Errorf("no end date, no expire: %q", h.Get("subscription-userinfo"))
-	}
-	if got := titleWithStats(&Config{}, "Имя", UserTraffic{AllUp: 1 << 20, AllDown: 3 << 30}, &User{}); !strings.Contains(got, "↓3.00 ГБ") || !strings.Contains(got, "↑1.00 МБ") || !strings.Contains(got, "без срока") {
-		t.Errorf("title text: %q", got)
-	}
-	off := false
-	if got := titleWithStats(&Config{SubTitleStats: &off}, "Имя", UserTraffic{}, &User{}); got != "Имя" {
-		t.Errorf("stats switched off: %q", got)
 	}
 }

@@ -16,13 +16,34 @@ func (c *Checker) modeSpeedOf(st *NodeState, now time.Time) int {
 	return k
 }
 
+// inPool returns the test "this node belongs to the pool of the channel" (c.mu is held). The operator's pool is every node
+// that is not only in the users' list; the users' pool is the nodes of users_subscriptions, and while there are none the
+// channel works on the pool of the operator.
+func (c *Checker) inPool(ch string) func(*NodeState) bool {
+	if ch != chanUsers {
+		return func(st *NodeState) bool { return st.Node.InAdmin || !st.Node.InUsers }
+	}
+	own := false
+	for _, st := range c.states {
+		if st.Node.InUsers {
+			own = true
+			break
+		}
+	}
+	if !own {
+		return func(st *NodeState) bool { return true }
+	}
+	return func(st *NodeState) bool { return st.Node.InUsers }
+}
+
 // modePool is the group of the best nodes by the common parameters (score, quality rules, required services).
 // Only nodes of this group compete for the extra modes, so "fastest" never means "fast but flaky".
-func (c *Checker) modePool(now time.Time) []*NodeState {
+func (c *Checker) modePool(now time.Time, ch string) []*NodeState {
 	minSpeed, required := c.cfg.getMinSpeed(), c.cfg.getRequired()
 	var good, any []*NodeState
+	in := c.inPool(ch)
 	for _, st := range c.states {
-		if st.score <= 0 || !st.Node.Allowed(c.cfg) {
+		if st.score <= 0 || !st.Node.Allowed(c.cfg) || !in(st) {
 			continue
 		}
 		any = append(any, st)
@@ -49,6 +70,7 @@ func (c *Checker) modePool(now time.Time) []*NodeState {
 
 // modeBest picks the node of a mode from the pool.
 func (c *Checker) modeBest(mode string, pool []*NodeState, now time.Time) *NodeState {
+	mode = modeBase(mode)
 	var best *NodeState
 	for _, st := range pool {
 		switch {
@@ -69,6 +91,10 @@ func (c *Checker) modeBest(mode string, pool []*NodeState, now time.Time) *NodeS
 			if a > 0 && (b <= 0 || a < b || (a == b && better(st, best))) {
 				best = st
 			}
+		case mode == "":
+			if better(st, best) {
+				best = st
+			}
 		}
 	}
 	return best
@@ -78,16 +104,17 @@ func (c *Checker) modeBest(mode string, pool []*NodeState, now time.Time) *NodeS
 // a better one has to be clearly better for several check cycles in a row, like for the main balancer.
 func (c *Checker) decideModeLocked(mode string, cycle bool) (target *Node, reason string) {
 	now := time.Now()
-	pool := c.modePool(now)
+	pool := c.modePool(now, modeChannel(mode))
 	if len(pool) == 0 {
 		return nil, ""
 	}
+	base := modeBase(mode)
 	if mode == modeSpread {
 		c.decaySpreadLocked(now)
 	}
 	best := c.modeBest(mode, pool, now)
 	cur := c.states[c.modeCur[mode]]
-	if cur == nil || cur.score <= 0 || !cur.Node.Allowed(c.cfg) {
+	if cur == nil || cur.score <= 0 || !cur.Node.Allowed(c.cfg) || !c.inPool(modeChannel(mode))(cur) {
 		c.modeCand[mode], c.modeCnt[mode] = "", 0
 		return best.Node, "failover"
 	}
@@ -104,12 +131,15 @@ func (c *Checker) decideModeLocked(mode string, cycle bool) (target *Node, reaso
 		return nil, ""
 	}
 	clear := false
-	switch mode {
+	switch base {
 	case modeSpeed:
 		a, b := c.modeSpeedOf(best, now), c.modeSpeedOf(cur, now)
 		clear = a > 0 && float64(a) >= 1.3*float64(b) && a-b >= 2000
 	case modePing:
 		clear = best.ewma > 0 && (cur.ewma <= 0 || (best.ewma <= 0.75*cur.ewma && cur.ewma-best.ewma >= 15))
+	case "":
+		margin, _ := c.cfg.getSwitch()
+		clear = best.score >= cur.score*margin
 	}
 	if !clear {
 		c.modeCand[mode], c.modeCnt[mode] = "", 0

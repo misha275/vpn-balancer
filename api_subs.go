@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -38,6 +39,9 @@ func subTitle(key string, bundles map[string]string) string {
 		return "Конечные серверы (из раздела «Сеть»)"
 	}
 	if n, ok := bundles[key]; ok {
+		if strings.HasPrefix(key, serverPrefix) {
+			return "Сервер: " + n
+		}
 		return "Категория: " + n
 	}
 	return key + " (категория удалена)"
@@ -73,6 +77,15 @@ func (a *API) catalog(r *http.Request) (*catalogView, error) {
 	}
 	v := &catalogView{Nodes: ns, Sources: srcs, Bundles: bs, Default: a.cfg.defaultSubs(), Days: a.cfg.defaultDays(),
 		Subs: []catalogSub{{subBalancers, subTitle(subBalancers, nil), true}, {subAll, subTitle(subAll, nil), true}, {subServers, subTitle(subServers, nil), true}}}
+	if svs, err := a.store.ListServers(r.Context()); err == nil {
+		for _, sv := range svs {
+			t := "Сервер: " + sv.Name
+			if !sv.Enabled {
+				t += " (выключен)"
+			}
+			v.Subs = append(v.Subs, catalogSub{fmt.Sprintf("%s%d", serverPrefix, sv.ID), t, false})
+		}
+	}
 	for _, b := range bs {
 		t := "Категория: " + b.Name
 		if !b.Enabled {
@@ -89,6 +102,11 @@ func (a *API) bundleNames(r *http.Request) map[string]string {
 	if bs, err := a.store.ListBundles(r.Context(), false); err == nil {
 		for _, b := range bs {
 			out[bundlePrefix+b.Slug] = b.Name
+		}
+	}
+	if svs, err := a.store.ListServers(r.Context()); err == nil {
+		for _, sv := range svs {
+			out[fmt.Sprintf("%s%d", serverPrefix, sv.ID)] = sv.Name
 		}
 	}
 	return out
@@ -271,20 +289,21 @@ func (a *API) userPlan(w http.ResponseWriter, r *http.Request) {
 
 type userStatsView struct {
 	*UserStats
-	Enabled    bool       `json:"enabled"`
-	Expires    int64      `json:"expires"`
-	Email      string     `json:"email,omitempty"`
-	Online     bool       `json:"online"`
-	Sessions   []SessInfo `json:"sessions"`
-	SpeedUp    int64      `json:"speed_up"`
-	SpeedDown  int64      `json:"speed_down"`
-	Errors     int64      `json:"errors"`
-	LastError  string     `json:"last_error,omitempty"`
-	SubFetched int64      `json:"sub_fetched"`
-	SubFetches int64      `json:"sub_fetches"`
-	Plan       string     `json:"plan,omitempty"`
-	SubKeys    []string   `json:"sub_keys"`
-	SubSource  string     `json:"sub_source"`
+	Enabled    bool          `json:"enabled"`
+	Expires    int64         `json:"expires"`
+	Email      string        `json:"email,omitempty"`
+	Online     bool          `json:"online"`
+	Sessions   []SessInfo    `json:"sessions"`
+	SpeedUp    int64         `json:"speed_up"`
+	SpeedDown  int64         `json:"speed_down"`
+	Errors     int64         `json:"errors"`
+	LastError  string        `json:"last_error,omitempty"`
+	SubFetched int64         `json:"sub_fetched"`
+	SubFetches int64         `json:"sub_fetches"`
+	Plan       string        `json:"plan,omitempty"`
+	SubKeys    []string      `json:"sub_keys"`
+	SubSource  string        `json:"sub_source"`
+	Servers    []ServerUsage `json:"servers"`
 }
 
 func (a *API) userStats(w http.ResponseWriter, r *http.Request) {
@@ -317,6 +336,10 @@ func (a *API) userStats(w http.ResponseWriter, r *http.Request) {
 		v.SubFetched = u.SubFetched.Unix()
 	}
 	v.SubKeys, v.SubSource = effectiveSubs(a.cfg, *u)
+	v.Servers, _ = a.store.TrafficByServer(r.Context(), name)
+	if v.Servers == nil {
+		v.Servers = []ServerUsage{}
+	}
 	if u.PlanID != nil {
 		if p, err := a.store.PlanByID(r.Context(), *u.PlanID); err == nil {
 			v.Plan = p.Name

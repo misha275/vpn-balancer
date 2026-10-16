@@ -69,10 +69,14 @@ func (s *Store) SyncUsers(ctx context.Context, list []SyncUser) (bool, error) {
 			continue
 		}
 		names = append(names, u.Name)
-		t, err := tx.Exec(ctx, `INSERT INTO users(name,uuid,sub_token,enabled,expires_at,synced,subs) VALUES($1,$2::uuid,$3,true,$4,true,ARRAY['balancers'])
-			ON CONFLICT (name) DO UPDATE SET uuid=EXCLUDED.uuid, sub_token=EXCLUDED.sub_token, enabled=true, expires_at=EXCLUDED.expires_at, synced=true, subs=ARRAY['balancers']
-			WHERE users.uuid<>EXCLUDED.uuid OR users.sub_token<>EXCLUDED.sub_token OR NOT users.enabled OR users.expires_at IS DISTINCT FROM EXCLUDED.expires_at OR NOT users.synced`,
-			u.Name, u.UUID, u.SubToken, u.Expires)
+		ch := chanAdmin
+		if u.Channel == chanUsers {
+			ch = chanUsers
+		}
+		t, err := tx.Exec(ctx, `INSERT INTO users(name,uuid,sub_token,enabled,expires_at,synced,subs,channel) VALUES($1,$2::uuid,$3,true,$4,true,ARRAY['balancers'],$5)
+			ON CONFLICT (name) DO UPDATE SET uuid=EXCLUDED.uuid, sub_token=EXCLUDED.sub_token, enabled=true, expires_at=EXCLUDED.expires_at, synced=true, subs=ARRAY['balancers'], channel=EXCLUDED.channel
+			WHERE users.uuid<>EXCLUDED.uuid OR users.sub_token<>EXCLUDED.sub_token OR NOT users.enabled OR users.expires_at IS DISTINCT FROM EXCLUDED.expires_at OR NOT users.synced OR users.channel<>EXCLUDED.channel`,
+			u.Name, u.UUID, u.SubToken, u.Expires, ch)
 		if err != nil {
 			return false, fmt.Errorf("user %s: %v", u.Name, err)
 		}
@@ -116,8 +120,8 @@ func (s *Store) UserTotals(ctx context.Context) (map[string][2]int64, error) {
 // balancerInfo is what a balancer server tells the panel: where it is and how to build links for a user.
 func balancerInfo(cfg *Config, users int) ServerInfo {
 	info := ServerInfo{Version: appVersion, Host: cfg.PublicHost, Users: users}
-	for _, m := range linkModes(cfg) {
-		info.Links = append(info.Links, LinkTmpl{Title: modeTitle(m), Mode: m, Tmpl: userLink(cfg, modeLinkName(cfg, m), "{UUID}")})
+	for _, m := range append(append([]string(nil), linkModes(cfg)...), userChanModes...) {
+		info.Links = append(info.Links, LinkTmpl{Title: baseTitle(modeBase(m)), Mode: m, Tmpl: userLink(cfg, modeLinkName(cfg, m), "{UUID}")})
 	}
 	return info
 }

@@ -74,7 +74,16 @@ func fetchSub(ctx context.Context, rawURL, ua string) (string, error) {
 // nothing: its nodes stay in the pool until node_grace expires.
 func (s *Subs) Refresh(ctx context.Context) {
 	total := 0
+	type src struct{ url, pool string }
+	var list []src
 	for _, u := range s.cfg.getSubscriptions() {
+		list = append(list, src{u, chanAdmin})
+	}
+	for _, u := range s.cfg.getUsersSubscriptions() {
+		list = append(list, src{u, chanUsers})
+	}
+	for _, sc := range list {
+		u := sc.url
 		body, err := fetchSub(ctx, u, s.cfg.SubUserAgent)
 		var nodes []*Node
 		if err == nil {
@@ -88,15 +97,15 @@ func (s *Subs) Refresh(ctx context.Context) {
 			}
 		}
 		if err != nil {
-			s.fails[u]++
-			log.Printf("subs: %s: %v (fail #%d)", redact(u), err, s.fails[u])
-			if s.fails[u] >= 3 { // Notify rate-limits repeats (every 6h)
+			s.fails[sc.pool+u]++
+			log.Printf("subs: %s: %v (fail #%d)", redact(u), err, s.fails[sc.pool+u])
+			if s.fails[sc.pool+u] >= 3 { // Notify rate-limits repeats (every 6h)
 				s.notify.Notify("sub:"+redact(u), "⚠️ Подписка "+redact(u)+" не обновляется: "+err.Error(), 6*time.Hour)
 			}
 			continue
 		}
-		s.fails[u] = 0
-		if err := s.store.UpsertNodes(ctx, nodes, redact(u)); err != nil {
+		s.fails[sc.pool+u] = 0
+		if err := s.store.UpsertNodesPool(ctx, nodes, redact(u), sc.pool); err != nil {
 			log.Printf("subs: store: %v", err)
 			continue
 		}

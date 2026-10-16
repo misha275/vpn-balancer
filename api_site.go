@@ -27,6 +27,9 @@ func (a *API) registerSite(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/accounts", a.auth(a.accountsList))
 	mux.HandleFunc("POST /api/accounts", a.auth(a.accountCreate))
 	mux.HandleFunc("POST /api/accounts/{id}/{op}", a.auth(a.accountOp))
+	mux.HandleFunc("GET /api/promos", a.auth(a.promosList))
+	mux.HandleFunc("POST /api/promos", a.auth(a.promoSave))
+	mux.HandleFunc("DELETE /api/promos/{code}", a.auth(a.promoDelete))
 	mux.HandleFunc("GET /api/payments", a.auth(a.paymentsList))
 	mux.HandleFunc("POST /api/payments/{id}/{op}", a.auth(a.paymentOp))
 	mux.HandleFunc("POST /api/users/{name}/expiry", a.auth(a.userExpiry))
@@ -171,6 +174,8 @@ type accountView struct {
 	Created    int64  `json:"created"`
 	LastLogin  int64  `json:"last_login"`
 	Note       string `json:"note"`
+	Balance    int64  `json:"balance_cents"`
+	Telegram   bool   `json:"telegram"`
 }
 
 func (a *API) accountsList(w http.ResponseWriter, r *http.Request) {
@@ -183,7 +188,7 @@ func (a *API) accountsList(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	out := make([]accountView, 0, len(accs))
 	for _, ac := range accs {
-		v := accountView{ID: ac.ID, Email: ac.Email, User: ac.UserName, Blocked: ac.Blocked, Created: ac.Created.Unix(), Note: ac.Note}
+		v := accountView{ID: ac.ID, Email: ac.Email, User: ac.UserName, Blocked: ac.Blocked, Created: ac.Created.Unix(), Note: ac.Note, Balance: ac.Balance, Telegram: ac.TgChat != nil}
 		v.State, v.DaysLeft = periodState(ac.Expires, now)
 		if ac.Blocked {
 			v.State = "blocked"
@@ -232,7 +237,7 @@ func (a *API) accountCreate(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, 500, err)
 		return
 	}
-	if _, err := a.store.CreateAccount(r.Context(), in.Email, string(hash), in.Days); err != nil {
+	if _, err := a.store.CreateAccountIn(r.Context(), in.Email, string(hash), in.Days, a.cfg.getSiteChannel()); err != nil {
 		code := 500
 		if errors.Is(err, ErrEmailTaken) {
 			code = 409
@@ -336,6 +341,20 @@ func (a *API) accountOp(w http.ResponseWriter, r *http.Request) {
 			apiErr(w, 400, err)
 			return
 		}
+	case "balance":
+		var in struct {
+			Delta int64  `json:"delta_cents"`
+			Note  string `json:"note"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&in); err != nil {
+			apiErr(w, 400, fmt.Errorf("ожидается JSON {delta_cents, note}"))
+			return
+		}
+		kind := "admin"
+		if err := a.store.AdjustBalance(r.Context(), id, in.Delta, kind, strings.TrimSpace(in.Note)); err != nil {
+			apiErr(w, 400, err)
+			return
+		}
 	case "note":
 		var in struct {
 			Note string `json:"note"`
@@ -349,7 +368,7 @@ func (a *API) accountOp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	default:
-		apiErr(w, 400, fmt.Errorf("операции: block, unblock, delete, reset-password, expiry, note"))
+		apiErr(w, 400, fmt.Errorf("операции: block, unblock, delete, reset-password, expiry, note, balance"))
 		return
 	}
 	a.accountsList(w, r)
@@ -412,4 +431,38 @@ func (a *API) paymentOp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.paymentsList(w, r)
+}
+
+func (a *API) promosList(w http.ResponseWriter, r *http.Request) {
+	ps, err := a.store.ListPromos(r.Context())
+	if err != nil {
+		apiErr(w, 500, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"promos": ps})
+}
+
+// promoSave creates or changes a promo code: {"code","kind":"percent|days|balance","value","max_uses","expires":"2026-12-31T00:00:00Z","enabled","note"}.
+func (a *API) promoSave(w http.ResponseWriter, r *http.Request) {
+	var p Promo
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&p); err != nil {
+		apiErr(w, 400, fmt.Errorf("ожидается JSON промокода"))
+		return
+	}
+	if err := a.store.SavePromo(r.Context(), p); err != nil {
+		apiErr(w, 400, err)
+		return
+	}
+	a.promosList(w, r)
+}
+
+func (a *API) promoDelete(w http.ResponseWriter, r *http.Request) {
+	if ok, err := a.store.DeletePromo(r.Context(), r.PathValue("code")); err != nil {
+		apiErr(w, 500, err)
+		return
+	} else if !ok {
+		apiErr(w, 404, fmt.Errorf("промокод не найден"))
+		return
+	}
+	a.promosList(w, r)
 }

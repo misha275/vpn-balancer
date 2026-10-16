@@ -38,15 +38,17 @@ type User struct {
 	SubFetched *time.Time // last time the subscription was downloaded
 	SubFetches int64
 
+	Channel     string // balancer channel: "admin" (default) or "users" (see modes.go)
+	Nick        string // the name shown to the person (the subscription title, the cabinet); "" = derived from the name
 	BlockKind   string // "" = not blocked, else unpaid | ban | other
 	BlockReason string
 	BlockedAt   *time.Time
 }
 
-const userCols = `id,name,uuid::text,enabled,sub_token,expires_at,subs,plan_id,(SELECT p.subs FROM plans p WHERE p.id=users.plan_id),sub_fetched,sub_fetches,COALESCE(block_kind,''),block_reason,blocked_at`
+const userCols = `id,name,uuid::text,enabled,sub_token,expires_at,subs,plan_id,(SELECT p.subs FROM plans p WHERE p.id=users.plan_id),sub_fetched,sub_fetches,COALESCE(block_kind,''),block_reason,blocked_at,nick,channel`
 
 func scanUser(r interface{ Scan(...any) error }, u *User) error {
-	return r.Scan(&u.ID, &u.Name, &u.UUID, &u.Enabled, &u.SubToken, &u.Expires, &u.Subs, &u.PlanID, &u.PlanSubs, &u.SubFetched, &u.SubFetches, &u.BlockKind, &u.BlockReason, &u.BlockedAt)
+	return r.Scan(&u.ID, &u.Name, &u.UUID, &u.Enabled, &u.SubToken, &u.Expires, &u.Subs, &u.PlanID, &u.PlanSubs, &u.SubFetched, &u.SubFetches, &u.BlockKind, &u.BlockReason, &u.BlockedAt, &u.Nick, &u.Channel)
 }
 
 // Active reports whether the key may work now (enabled and the period has not ended).
@@ -99,11 +101,20 @@ func NewStore(ctx context.Context, url string) (*Store, error) {
 }
 
 func (s *Store) UpsertNodes(ctx context.Context, nodes []*Node, source string) error {
+	return s.UpsertNodesPool(ctx, nodes, source, chanAdmin)
+}
+
+// UpsertNodesPool is UpsertNodes for the subscription list of a channel: the node is marked as seen in that pool.
+func (s *Store) UpsertNodesPool(ctx context.Context, nodes []*Node, source, pool string) error {
 	b := &pgx.Batch{}
+	col := "seen_admin"
+	if pool == chanUsers {
+		col = "seen_users"
+	}
 	for _, n := range nodes {
-		b.Queue(`INSERT INTO nodes(id,name,type,server,port,outbound,source,link)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8)
-			ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, last_seen=now(), source=EXCLUDED.source, link=EXCLUDED.link`,
+		b.Queue(`INSERT INTO nodes(id,name,type,server,port,outbound,source,link,`+col+`)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,now())
+			ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, last_seen=now(), source=EXCLUDED.source, link=EXCLUDED.link, `+col+`=now()`,
 			n.ID, n.Name, n.Type, n.Server, n.Port, n.Outbound, source, n.Link)
 	}
 	br := s.pool.SendBatch(ctx, b)
@@ -121,7 +132,8 @@ func (s *Store) UpsertNodes(ctx context.Context, nodes []*Node, source string) e
 // stay in the pool until the grace period ends.
 func (s *Store) ActiveNodes(ctx context.Context, grace time.Duration) ([]*Node, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id,name,type,server,port,outbound,link,exit_ip,exit_country,exit_checked,speed_hist,speed_try_at,speed_err,check_at,svc FROM nodes WHERE last_seen > $1 ORDER BY id`,
+		`SELECT id,name,type,server,port,outbound,link,exit_ip,exit_country,exit_checked,speed_hist,speed_try_at,speed_err,check_at,svc,
+		COALESCE(seen_admin > $1, false), COALESCE(seen_users > $1, false) FROM nodes WHERE last_seen > $1 ORDER BY id`,
 		time.Now().Add(-grace))
 	if err != nil {
 		return nil, err
@@ -132,7 +144,7 @@ func (s *Store) ActiveNodes(ctx context.Context, grace time.Duration) ([]*Node, 
 		n := &Node{}
 		var hist, svc []byte
 		if err := rows.Scan(&n.ID, &n.Name, &n.Type, &n.Server, &n.Port, &n.Outbound, &n.Link, &n.ExitIP, &n.ExitCountry, &n.ExitChecked,
-			&hist, &n.SpeedTry, &n.SpeedErr, &n.CheckAt, &svc); err != nil {
+			&hist, &n.SpeedTry, &n.SpeedErr, &n.CheckAt, &svc, &n.InAdmin, &n.InUsers); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(hist, &n.SpeedHist)
@@ -252,7 +264,7 @@ func (s *Store) LogSwitch(ctx context.Context, from, to, reason string) {
 
 func (s *Store) LastSelected(ctx context.Context) string {
 	var id string
-	if err := s.pool.QueryRow(ctx, `SELECT to_node FROM switches WHERE reason NOT LIKE 'speed:%' AND reason NOT LIKE 'ping:%' ORDER BY ts DESC LIMIT 1`).Scan(&id); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT to_node FROM switches WHERE reason NOT LIKE 'speed:%' AND reason NOT LIKE 'ping:%' AND reason NOT LIKE 'spread:%' AND reason NOT LIKE 'u:%' AND reason NOT LIKE 'u-%' ORDER BY ts DESC LIMIT 1`).Scan(&id); err != nil {
 		return ""
 	}
 	return id
@@ -262,6 +274,7 @@ func (s *Store) Cleanup(ctx context.Context, keep time.Duration) {
 	_, _ = s.pool.Exec(ctx, `DELETE FROM checks WHERE ts < $1`, time.Now().Add(-keep))
 	_, _ = s.pool.Exec(ctx, `DELETE FROM switches WHERE ts < $1`, time.Now().Add(-90*24*time.Hour))
 	_, _ = s.pool.Exec(ctx, `DELETE FROM traffic_hourly WHERE hour < $1`, time.Now().Add(-180*24*time.Hour))
+	_, _ = s.pool.Exec(ctx, `DELETE FROM server_traffic_hourly WHERE hour < $1`, time.Now().Add(-180*24*time.Hour))
 	_, _ = s.pool.Exec(ctx, `DELETE FROM metrics WHERE ts < $1`, time.Now().Add(-14*24*time.Hour))
 }
 
@@ -436,7 +449,7 @@ func (s *Store) TrafficSummary(ctx context.Context) (map[string]*TrafficSum, err
 		COALESCE(SUM(up) FILTER (WHERE hour > now()-interval '7 days'),0),   COALESCE(SUM(down) FILTER (WHERE hour > now()-interval '7 days'),0),
 		COALESCE(SUM(up) FILTER (WHERE hour > now()-interval '30 days'),0),  COALESCE(SUM(down) FILTER (WHERE hour > now()-interval '30 days'),0),
 		COALESCE(SUM(up),0), COALESCE(SUM(down),0), COALESCE(SUM(conns),0)
-		FROM traffic_hourly GROUP BY user_name`)
+		FROM traffic_all GROUP BY user_name`)
 	if err != nil {
 		return nil, err
 	}
@@ -542,7 +555,60 @@ func (s *Store) DeleteUser(ctx context.Context, name string) (bool, error) {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM users WHERE name=$1`, name)
 	if err == nil && tag.RowsAffected() > 0 { // the user's counters go with the user
 		_, _ = s.pool.Exec(ctx, `DELETE FROM traffic_hourly WHERE user_name=$1`, name)
+		_, _ = s.pool.Exec(ctx, `DELETE FROM server_traffic_hourly WHERE user_name=$1`, name)
+		_, _ = s.pool.Exec(ctx, `DELETE FROM server_traffic WHERE user_name=$1`, name)
 		_, _ = s.pool.Exec(ctx, `DELETE FROM user_seen WHERE user_name=$1`, name)
 	}
 	return tag.RowsAffected() > 0, err
+}
+
+// DisplayNick is the nick, or (when none is set) the name; an e-mail name shows only the part before "@".
+func (u User) DisplayNick() string {
+	if n := strings.TrimSpace(u.Nick); n != "" {
+		return n
+	}
+	if i := strings.Index(u.Name, "@"); i > 0 {
+		return u.Name[:i]
+	}
+	return u.Name
+}
+
+// CleanNick checks a nick: 1-32 characters, no control characters and no line breaks.
+func CleanNick(n string) (string, error) {
+	n = strings.Join(strings.Fields(n), " ")
+	r := []rune(n)
+	if len(r) < 1 || len(r) > 32 {
+		return "", errors.New("ник: от 1 до 32 символов")
+	}
+	for _, c := range r {
+		if c < 32 || c == 127 || c == '<' || c == '>' {
+			return "", errors.New("ник: недопустимые символы")
+		}
+	}
+	return n, nil
+}
+
+// SetChannel moves a user to a channel of the balancer ("admin" or "users").
+func (s *Store) SetChannel(ctx context.Context, name, ch string) error {
+	if ch != chanAdmin && ch != chanUsers {
+		return errors.New("канал: admin или users")
+	}
+	t, err := s.pool.Exec(ctx, `UPDATE users SET channel=$2 WHERE name=$1`, name, ch)
+	if err == nil && t.RowsAffected() == 0 {
+		return errors.New("user not found")
+	}
+	return err
+}
+
+// SetNick changes the nick of a user. The name (the key in the gateway and in the statistics) and the number (id) stay.
+func (s *Store) SetNick(ctx context.Context, name, nick string) error {
+	nick, err := CleanNick(nick)
+	if err != nil {
+		return err
+	}
+	t, err := s.pool.Exec(ctx, `UPDATE users SET nick=$2 WHERE name=$1`, name, nick)
+	if err == nil && t.RowsAffected() == 0 {
+		return errors.New("user not found")
+	}
+	return err
 }

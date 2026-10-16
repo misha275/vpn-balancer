@@ -644,11 +644,12 @@ func (c *Checker) decideLocked(cycle bool) (target *Node, reason string, none bo
 	now := time.Now()
 	minSpeed, required := c.cfg.getMinSpeed(), c.cfg.getRequired()
 	issue := map[string]string{}
+	inPool := c.inPool(chanAdmin)
 	for _, st := range c.states {
 		if len(st.win) == 0 {
 			unchecked++
 		}
-		if st.score <= 0 || !st.Node.Allowed(c.cfg) {
+		if st.score <= 0 || !st.Node.Allowed(c.cfg) || !inPool(st) {
 			continue // dead, or its exit country is unknown/censored: never carry user traffic
 		}
 		if better(st, bestAny) {
@@ -670,7 +671,7 @@ func (c *Checker) decideLocked(cycle bool) (target *Node, reason string, none bo
 		return nil, "", len(c.states) > 0 && unchecked == 0
 	}
 	cur := c.states[c.current]
-	if cur == nil || cur.score <= 0 || !cur.Node.Allowed(c.cfg) {
+	if cur == nil || cur.score <= 0 || !cur.Node.Allowed(c.cfg) || !inPool(cur) {
 		c.candID, c.candCnt = "", 0
 		return best.Node, "failover", false
 	}
@@ -807,6 +808,7 @@ type NodeView struct {
 	Pinned      bool              `json:"pinned"`
 	ExitCountry string            `json:"exit_country"`
 	ExitIP      string            `json:"exit_ip"`
+	Pool        string            `json:"pool"`    // "admin", "users" or "both": in whose list of subscriptions the node was seen
 	Allowed     bool              `json:"allowed"` // may carry user traffic (exit country known and not censored)
 }
 
@@ -840,7 +842,7 @@ func (c *Checker) Snapshot() Snapshot {
 	if st := c.states[c.pinned]; st != nil {
 		s.Pinned = st.Node.Name
 	}
-	for _, m := range linkModes(c.cfg) {
+	for _, m := range panelModes(c.cfg) {
 		id := c.current
 		if m != "" {
 			id = c.modeCur[m]
@@ -859,7 +861,7 @@ func (c *Checker) Snapshot() Snapshot {
 			SpeedAt: unixOrZero(st.speedAt()), SpeedTry: unixOrZero(st.speedTry), CheckAt: unixOrZero(st.checkAt), Services: copySvc(st.svc),
 			Quality: c.qualityIssue(st, time.Now(), c.cfg.getMinSpeed(), c.cfg.getRequired()), Current: id == c.current, Modes: c.modesOn(id), Pinned: id == c.pinned,
 			Quarantined: time.Now().Before(st.quarantine) || (st.Node.ExitCountry != "" && c.cfg.exitCheckOn() && c.cfg.isBlocked(st.Node.ExitCountry)),
-			ExitCountry: st.Node.ExitCountry, ExitIP: st.Node.ExitIP, Allowed: st.Node.Allowed(c.cfg),
+			ExitCountry: st.Node.ExitCountry, ExitIP: st.Node.ExitIP, Allowed: st.Node.Allowed(c.cfg), Pool: nodePool(st.Node),
 		})
 	}
 	sort.Slice(s.Nodes, func(i, j int) bool { return s.Nodes[i].Score > s.Nodes[j].Score })

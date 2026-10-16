@@ -584,9 +584,13 @@ func BuildConfig(cfg *Config, nodes []*Node, users []User, def string) ([]byte, 
 		}
 	}
 	// the extra balancer modes get their own copy of the rules (first match wins, so they go before the common ones)
-	if len(modeUsers(users, modeSpeed)) > 0 && hasProxy {
+	if anyBalancerUser(users) && hasProxy {
 		for _, m := range balModes {
-			mr, err := compileRules(cfg.getRules(), hasProxy, modeTag(m), modeUsers(users, m))
+			mu := modeUsers(users, m)
+			if len(mu) == 0 {
+				continue
+			}
+			mr, err := compileRules(cfg.getRules(), hasProxy, modeTag(m), mu)
 			if err != nil {
 				return nil, err
 			}
@@ -627,9 +631,11 @@ func BuildConfig(cfg *Config, nodes []*Node, users []User, def string) ([]byte, 
 		}
 		if defaultAction != "block" {
 			final = "proxy"
-			if len(modeUsers(users, modeSpeed)) > 0 {
+			if anyBalancerUser(users) {
 				for _, m := range balModes {
-					rules = append(rules, map[string]any{"inbound": []string{"vless-in"}, "auth_user": modeUsers(users, m), "outbound": modeTag(m)})
+					if mu := modeUsers(users, m); len(mu) > 0 {
+						rules = append(rules, map[string]any{"inbound": []string{"vless-in"}, "auth_user": mu, "outbound": modeTag(m)})
+					}
 				}
 			}
 		}
@@ -643,6 +649,9 @@ func BuildConfig(cfg *Config, nodes []*Node, users []User, def string) ([]byte, 
 		for _, u := range users {
 			if !u.NoBalancer {
 				for _, m := range allModes {
+					if modeChannel(m) != u.Chan() {
+						continue
+					}
 					vu = append(vu, map[string]any{"name": modeUser(u.Name, m), "uuid": modeUUID(u.UUID, m), "flow": "xtls-rprx-vision"})
 				}
 			}

@@ -21,21 +21,92 @@ const (
 	modeSpread = "spread"
 )
 
-// balModes are the extra modes (the main one is the empty string).
-var balModes = []string{modeSpeed, modePing, modeSpread}
+// Two channels of the balancer. "admin" is the pool of nodes of the operator (subscriptions of the provider), with all the
+// modes above. "users" is the second pool for the people of the service (users_subscriptions): its own selectors "u",
+// "u-speed" and "u-ping" choose among the nodes of that pool only. A user belongs to one channel (users.channel) and gets
+// the links of its modes. While no node was loaded for the users' pool, that channel works on the pool of the operator.
+const (
+	chanAdmin = "admin"
+	chanUsers = "users"
 
-// allModes lists every mode in the order they appear in links and the panel.
-var allModes = []string{"", modeSpeed, modePing, modeSpread}
+	modeUser0    = "u" // the main balancer of the users' channel
+	modeUserSpd  = "u-speed"
+	modeUserPing = "u-ping"
+)
 
-// linkModes are the modes people see (links, subscriptions, panel): "spread" only when it is switched on.
-func linkModes(cfg *Config) []string {
-	if cfg.spreadOn() {
-		return allModes
+// balModes are the extra modes (the main one of the admin channel is the empty string).
+var balModes = []string{modeSpeed, modePing, modeSpread, modeUser0, modeUserSpd, modeUserPing}
+
+// allModes lists every mode: first the admin channel, then the users' channel.
+var allModes = []string{"", modeSpeed, modePing, modeSpread, modeUser0, modeUserSpd, modeUserPing}
+
+// userChanModes are the modes of the users' channel.
+var userChanModes = []string{modeUser0, modeUserSpd, modeUserPing}
+
+// modeChannel is the channel a mode belongs to.
+func modeChannel(mode string) string {
+	if mode == modeUser0 || strings.HasPrefix(mode, "u-") {
+		return chanUsers
 	}
-	return allModes[:3]
+	return chanAdmin
+}
+
+// modeBase is the kind of the mode without the channel: "u-speed" -> "speed", "u" -> "" (the main one).
+func modeBase(mode string) string {
+	switch mode {
+	case modeUser0:
+		return ""
+	case modeUserSpd:
+		return modeSpeed
+	case modeUserPing:
+		return modePing
+	}
+	return mode
+}
+
+// Chan is the channel of the user ("admin" unless it is set to "users").
+func (u User) Chan() string {
+	if u.Channel == chanUsers {
+		return chanUsers
+	}
+	return chanAdmin
+}
+
+// chanModes are the modes of one channel that people see, main first: "spread" only when it is switched on.
+func chanModes(cfg *Config, ch string) []string {
+	if ch == chanUsers {
+		return userChanModes
+	}
+	if cfg.spreadOn() {
+		return []string{"", modeSpeed, modePing, modeSpread}
+	}
+	return []string{"", modeSpeed, modePing}
+}
+
+// linkModes are the modes of the admin channel (what the operator sees).
+func linkModes(cfg *Config) []string { return chanModes(cfg, chanAdmin) }
+
+// userModesOf are the modes whose links a user gets (his channel's).
+func userModesOf(cfg *Config, u User) []string { return chanModes(cfg, u.Chan()) }
+
+// panelModes are the modes the panel shows: the admin channel and, when a pool of the users' channel exists, its modes.
+func panelModes(cfg *Config) []string {
+	m := append([]string(nil), linkModes(cfg)...)
+	if cfg.usersChannelOn() {
+		m = append(m, userChanModes...)
+	}
+	return m
 }
 
 func modeTitle(mode string) string {
+	prefix := ""
+	if modeChannel(mode) == chanUsers {
+		prefix = "пользователи: "
+	}
+	return prefix + baseTitle(modeBase(mode))
+}
+
+func baseTitle(mode string) string {
 	switch mode {
 	case modeSpeed:
 		return "лучшая скорость"
@@ -100,10 +171,10 @@ func modeUUID(uuid, mode string) string {
 // modeLinkName is the label of the balancer in the client list.
 func modeLinkName(cfg *Config, mode string) string {
 	n := cfg.getGatewayName()
-	if mode == "" {
+	if modeBase(mode) == "" {
 		return n
 	}
-	return n + " · " + modeTitle(mode)
+	return n + " · " + baseTitle(modeBase(mode))
 }
 
 // modeLink is the vless:// link of a user for a mode.
@@ -111,10 +182,10 @@ func modeLink(cfg *Config, u User, mode string) string {
 	return userLink(cfg, modeLinkName(cfg, mode), modeUUID(u.UUID, mode))
 }
 
-// modeLinks are the links of all modes of a user, main first.
+// modeLinks are the links of all modes of a user (those of his channel), main first.
 func modeLinks(cfg *Config, u User) []string {
 	out := make([]string, 0, len(allModes))
-	for _, m := range linkModes(cfg) {
+	for _, m := range userModesOf(cfg, u) {
 		out = append(out, modeLink(cfg, u, m))
 	}
 	return out
@@ -124,12 +195,57 @@ func modeLinks(cfg *Config, u User) []string {
 func modeUsers(users []User, mode string) []string {
 	out := make([]string, 0, len(users))
 	for _, u := range users {
-		if u.NoBalancer {
+		if u.NoBalancer || u.Chan() != modeChannel(mode) {
 			continue
 		}
 		out = append(out, modeUser(u.Name, mode))
 	}
 	return out
+}
+
+// channelNodes are the nodes of the pool of a channel (see Checker.inPool): the users' channel sees only the nodes of
+// users_subscriptions, and all of them while there are none.
+func channelNodes(nodes []*Node, ch string) []*Node {
+	own := false
+	for _, n := range nodes {
+		if n.InUsers {
+			own = true
+			break
+		}
+	}
+	var out []*Node
+	for _, n := range nodes {
+		if (ch == chanUsers && (n.InUsers || !own)) || (ch != chanUsers && (n.InAdmin || !n.InUsers)) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+func nodePool(n *Node) string {
+	switch {
+	case n.InUsers && n.InAdmin:
+		return "both"
+	case n.InUsers:
+		return "users"
+	}
+	return "admin"
+}
+
+// anyBalancerUser says whether somebody uses the balancer at all.
+func anyBalancerUser(users []User) bool {
+	for _, u := range users {
+		if !u.NoBalancer {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Config) usersChannelOn() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return len(c.UsersSubscriptions) > 0
 }
 
 func (c *Config) spreadOn() bool {

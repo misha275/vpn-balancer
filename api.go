@@ -96,6 +96,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("GET /api/overview", a.auth(a.overview))
 	mux.HandleFunc("GET /api/stats", a.auth(a.statsView))
+	mux.HandleFunc("GET /api/traffic/network", a.auth(a.networkTraffic))
 	mux.HandleFunc("GET /api/stats/history", a.auth(a.statsHistory))
 	mux.HandleFunc("GET /api/logs", a.auth(a.consoleLogs))
 	mux.HandleFunc("GET /api/settings", a.auth(a.getSettings))
@@ -109,6 +110,8 @@ func (a *API) Register(mux *http.ServeMux) {
 	a.registerPages(mux)
 	a.registerBackup(mux)
 	mux.HandleFunc("POST /api/users", a.auth(a.addUser))
+	mux.HandleFunc("POST /api/users/{name}/nick", a.auth(a.userNick))
+	mux.HandleFunc("POST /api/users/{name}/channel", a.auth(a.userChannel))
 	mux.HandleFunc("POST /api/users/{name}/block", a.auth(a.userBlock))
 	mux.HandleFunc("POST /api/users/{name}/unblock", a.auth(a.userUnblock))
 	mux.HandleFunc("POST /api/users/{name}/{op}", a.auth(a.userOp))
@@ -221,6 +224,9 @@ func (a *API) kick() {
 }
 
 type userView struct {
+	ID           int64      `json:"id"`      // sequential number of the user: never changes
+	Nick         string     `json:"nick"`    // shown to the person
+	Channel      string     `json:"channel"` // balancer channel: admin or users
 	Name         string     `json:"name"`
 	Enabled      bool       `json:"enabled"`
 	Gateway      string     `json:"gateway"`      // the main balancer link
@@ -251,16 +257,16 @@ func newUserView(cfg *Config, u User) userView { return newUserViewB(cfg, u, nil
 
 // newUserViewB also names the bundles in the list of subscriptions.
 func newUserViewB(cfg *Config, u User, bundles map[string]string) userView {
-	v := userView{Name: u.Name, Enabled: u.Enabled, Gateway: userLink(cfg, cfg.getGatewayName(), u.UUID), Subscription: subURL(cfg, u.SubToken)}
+	v := userView{ID: u.ID, Nick: u.DisplayNick(), Name: u.Name, Enabled: u.Enabled, Gateway: modeLink(cfg, u, userModesOf(cfg, u)[0]), Channel: u.Chan(), Subscription: subURL(cfg, u.SubToken)}
 	if u.Expires != nil {
 		v.Expires = u.Expires.Unix()
 	}
-	for _, m := range linkModes(cfg) {
+	for _, m := range userModesOf(cfg, u) {
 		k := m
 		if k == "" {
 			k = "current"
 		}
-		v.Modes = append(v.Modes, linkView{k, "Балансировщик: " + modeTitle(m), modeLink(cfg, u, m)})
+		v.Modes = append(v.Modes, linkView{k, "Балансировщик: " + baseTitle(modeBase(m)), modeLink(cfg, u, m)})
 	}
 	v.OwnSubs = u.Subs
 	v.SubKeys, v.SubSource = effectiveSubs(cfg, u)
@@ -349,6 +355,40 @@ func (a *API) userOp(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, 404, err)
 		return
 	}
+	a.users(w, r)
+}
+
+// userNick changes the nick of a user: {"nick":"..."}.
+func (a *API) userNick(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Nick string `json:"nick"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&in); err != nil {
+		apiErr(w, 400, fmt.Errorf("ожидается JSON {nick}"))
+		return
+	}
+	if err := a.store.SetNick(r.Context(), r.PathValue("name"), in.Nick); err != nil {
+		apiErr(w, 400, err)
+		return
+	}
+	a.users(w, r)
+}
+
+// userChannel moves a user to a channel of the balancer: {"channel":"admin|users"}. His links change (the keys of the
+// other channel's modes), the gateway takes the new list over with the next reconcile.
+func (a *API) userChannel(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Channel string `json:"channel"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&in); err != nil {
+		apiErr(w, 400, fmt.Errorf("ожидается JSON {channel: admin|users}"))
+		return
+	}
+	if err := a.store.SetChannel(r.Context(), r.PathValue("name"), in.Channel); err != nil {
+		apiErr(w, 400, err)
+		return
+	}
+	a.kick()
 	a.users(w, r)
 }
 
@@ -538,4 +578,18 @@ func (a *API) consoleLogs(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, 200, a.logs.Since(after, limit))
 	}
+}
+
+// networkTraffic is the traffic of the whole network: every server separately and the sum.
+func (a *API) networkTraffic(w http.ResponseWriter, r *http.Request) {
+	list, err := a.store.TrafficByServer(r.Context(), "")
+	if err != nil {
+		apiErr(w, 500, err)
+		return
+	}
+	var t ServerUsage
+	for _, s := range list {
+		t.Up, t.Down, t.D30Up, t.D30Dn = t.Up+s.Up, t.Down+s.Down, t.D30Up+s.D30Up, t.D30Dn+s.D30Dn
+	}
+	writeJSON(w, 200, map[string]any{"servers": list, "total": t})
 }

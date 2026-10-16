@@ -119,7 +119,7 @@ $("#logout").onclick=()=>logout(false);
 $("#tokgo").onclick=async()=>{ TOKEN=$("#tok").value.trim(); try{ await api("GET","/api/overview"); sessionStorage.setItem("tok",TOKEN); start(); }catch(e){ $("#tokerr").textContent=e.message; } };
 $("#tok").addEventListener("keydown",e=>{ if(e.key==="Enter") $("#tokgo").click(); });
 
-const TABS=[["overview","Обзор"],["server","Сервер"],["clients","Клиенты"],["nodes","Узлы"],["settings","Настройки"],["users","Пользователи"],["subs","Серверы"],["net","Сеть"],["wg","WireGuard"],["site","Сайт"],["forum","Форум"],["backup","Бэкапы"],["console","Консоль"]];
+const TABS=[["overview","Обзор"],["server","Сервер"],["clients","Клиенты"],["nodes","Узлы"],["settings","Настройки"],["users","Пользователи"],["subs","Серверы"],["net","Сеть"],["wg","WireGuard"],["site","Сайт"],["service","Сервис"],["forum","Форум"],["backup","Бэкапы"],["console","Консоль"]];
 const PANEL_HIDE=["overview","server","clients","nodes","wg"]; // the role "panel" has no gateway
 function renderNav(){ const n=$("#nav"); n.replaceChildren(...TABS.filter(([id])=>!(DATA&&DATA.role==="panel"&&PANEL_HIDE.includes(id))).map(([id,t])=>h("button",{class:id===TAB?"on":"",onclick:()=>{TAB=id;load();}},t))); }
 
@@ -127,12 +127,14 @@ async function load(){
   renderNav();
   try{
     if (TAB==="overview"||TAB==="nodes"){ DATA=await api("GET","/api/overview"); }
+    if (TAB==="overview"||TAB==="net"){ try{ NETTR=await api("GET","/api/traffic/network"); }catch(e){ NETTR=null; } }
     if (TAB==="settings"){ SET=await api("GET","/api/settings"); }
     if (TAB==="users"){ [USERS,CAT,PLANS]=await Promise.all([api("GET","/api/users"),api("GET","/api/catalog"),api("GET","/api/plans")]); if(UEDIT&&UEDIT.mode==="stats"){ try{ UST=await api("GET","/api/users/"+encodeURIComponent(UEDIT.name)+"/stats"); }catch(e){ UST=null; } } }
     if (TAB==="subs"){ CAT=await api("GET","/api/catalog"); }
     if (TAB==="net"){ NET=await api("GET","/api/servers"); }
     if (TAB==="wg"){ WG=await api("GET","/api/wg"); }
     if (TAB==="site"){ [SITE,PLANS,ACCS,PAYS,CAT,PAGES]=await Promise.all([api("GET","/api/site"),api("GET","/api/plans"),api("GET","/api/accounts"),api("GET","/api/payments"),api("GET","/api/catalog"),api("GET","/api/site/pages").then(r=>r.pages)]); }
+    if (TAB==="service"){ [SET,PROMOS,ACCS,PAYS]=await Promise.all([api("GET","/api/settings"),api("GET","/api/promos").then(r=>r.promos),api("GET","/api/accounts"),api("GET","/api/payments")]); }
     if (TAB==="backup"){ BK=await api("GET","/api/backups"); }
     if (TAB==="forum"){ FORUM=await api("GET","/api/forum/topics"); if(FTOPIC){ try{ FTOPIC=await api("GET","/api/forum/topics/"+FTOPIC.topic.id); }catch(e){ FTOPIC=null; } } }
     if (TAB==="server"){ [STAT,HIST]=await Promise.all([api("GET","/api/stats"),api("GET","/api/stats/history?range="+RANGE)]); }
@@ -146,7 +148,7 @@ async function load(){
   st.className="pill "+(!DATA.ready||s.net_down?"bad":"ok");
   render();
 }
-function render(){ const m=$("#main"); m.replaceChildren(({overview:vOverview,server:vServer,clients:vClients,nodes:vNodes,settings:vSettings,users:vUsers,subs:vSubs,net:vNet,wg:vWG,site:vSite,forum:vForum,backup:vBackup,console:vConsole})[TAB]()); }
+function render(){ const m=$("#main"); m.replaceChildren(({overview:vOverview,server:vServer,clients:vClients,nodes:vNodes,settings:vSettings,users:vUsers,subs:vSubs,net:vNet,wg:vWG,site:vSite,service:vService,forum:vForum,backup:vBackup,console:vConsole})[TAB]()); }
 
 function fmtSpeed(k){ return k>0? (k>=1000? (k/1000).toFixed(0)+" Мбит/с": k+" кбит/с") : "—"; }
 function nodeStatus(n){
@@ -183,6 +185,18 @@ function gwText(d){
   let live=0, old=0, n=0; (g.slots||[]).forEach(s=>{ if(s.role==="active") live=s.conns; else { old+=s.conns; n++; } });
   return live+" подключ."+(n?" (+"+old+" на старой)":"");
 }
+let NETTR=null;
+// netTrafficCard: the traffic of the whole network, every server separately and the sum.
+function netTrafficCard(){
+  if(!NETTR||!NETTR.servers||!NETTR.servers.length) return null;
+  const t=NETTR.total;
+  return h("div",{class:"card tw"},h("h2",{},"Трафик всей сети"),
+    h("div",{class:"hint"},"Складывается с этого сервера и всех подключённых: узлы сами присылают счётчики своих пользователей."),
+    h("table",{},h("tr",{},["Сервер","За 30 дней ↓","↑","Всего ↓","↑"].map(x=>h("th",{},x))),
+      NETTR.servers.map(x=>h("tr",{},h("td",{},x.name,x.kind?h("span",{class:"muted"}," · "+(x.kind==="balancer"?"балансировщик":"конечный сервер")):null),
+        h("td",{},fmtBytes(x.d30_down)),h("td",{},fmtBytes(x.d30_up)),h("td",{},fmtBytes(x.down)),h("td",{},fmtBytes(x.up)))),
+      h("tr",{},h("td",{},h("b",{},"Итого")),h("td",{},h("b",{},fmtBytes(t.d30_down))),h("td",{},h("b",{},fmtBytes(t.d30_up))),h("td",{},h("b",{},fmtBytes(t.down))),h("td",{},h("b",{},fmtBytes(t.up))))));
+}
 function vOverview(){
   const s=DATA.snapshot, nodes=s.nodes||[];
   const alive=nodes.filter(n=>n.score>0&&n.allowed).length, excl=nodes.filter(n=>!n.allowed).length;
@@ -198,6 +212,7 @@ function vOverview(){
       card("Исключено по стране", excl, excl?"warn":""),
       card("Переключений", s.switches),
       card("Шлюз", gwText(DATA), DATA.gateway&&DATA.gateway.active>=0?"ok":"bad")),
+    netTrafficCard(),
     h("div",{class:"card"},h("h2",{},"Страны выхода"),
       h("div",{}, Object.entries(cc).sort((a,b)=>b[1]-a[1]).map(([c,n])=>h("span",{class:"chip",style:"padding-right:10px"},c+" × "+n)))),
     h("div",{class:"card"},h("h2",{},"Действия"),
@@ -229,7 +244,7 @@ function vNodes(){
     h("div",{class:"card tw"},h("table",{},
       h("tr",{},th("name","Название"),th("exit_country","Выход"),th("score","Оценка"),th("latency_ms","Задержка"),th("speed_kbps","Скорость"),h("th",{},"Сервисы"),th("check_at","Проверен"),th("allowed","Статус"),h("th",{},"")),
       rows.map(n=>{ const [t,c]=nodeStatus(n); return h("tr",{},
-        h("td",{},h("div",{},n.name,(n.modes||[]).map(m=>h("span",{class:"mchip"},({speed:"скорость",ping:"пинг",spread:"трафик"})[m]||m))),h("div",{class:"muted mono"},n.server+" · "+n.type)),
+        h("td",{},h("div",{},n.name,(n.modes||[]).map(m=>h("span",{class:"mchip"},({speed:"скорость",ping:"пинг",spread:"трафик",u:"польз.","u-speed":"польз.: скорость","u-ping":"польз.: пинг"})[m]||m)),(n.pool&&n.pool!=="admin")?h("span",{class:"mchip"},n.pool==="users"?"пул польз.":"оба пула"):null),h("div",{class:"muted mono"},n.server+" · "+n.type)),
         h("td",{},(n.exit_country||"?"),h("div",{class:"muted mono"},n.exit_ip||"")),
         h("td",{},n.score>0?n.score.toFixed(1):"0"),
         h("td",{},n.latency_ms?Math.round(n.latency_ms)+" мс":"—"),
@@ -261,6 +276,8 @@ function vSettings(){
   const confirmI=h("input",{type:"number",min:"1",max:"20",value:V.switch_confirm});
   const probes=h("textarea",{},V.probe_urls.join("\n"));
   const subs=h("textarea",{style:"min-height:120px"},V.subscriptions.join("\n"));
+  const usubs=h("textarea",{style:"min-height:90px"},(V.users_subscriptions||[]).join("\n"));
+  const siteCh=h("select",{},[["users","канал пользователей (свой пул узлов)"],["admin","канал админов (общий пул)"]].map(([v,t])=>h("option",{value:v,selected:v===(V.site_channel||"users")},t)));
   const minSpeed=h("input",{type:"number",min:"0",step:"1",value:Math.round((V.min_speed_kbps||0)/1000)});
   const reqSvc=h("input",{value:(V.required_services||[]).join(", "),placeholder:"telegram, youtube"});
   const svcs=h("textarea",{style:"min-height:200px;font-family:monospace;font-size:12px"},(V.services||[]).join("\n"));
@@ -289,6 +306,10 @@ function vSettings(){
       ()=>save({rules:rules.map(r=>({action:r.action,match:lines(r.match)})),default_action:defAct.value})),
     sec("Подписки провайдеров",["subscriptions","node_identity"],h("div",{},h("div",{class:"hint"},"По одному адресу на строку. Адреса содержат секреты, не показывайте экран посторонним."),subs,h("div",{style:"margin-top:10px"},h("div",{class:"k"},"Как считать узлы"),ident)),
       ()=>save({subscriptions:lines(subs.value),node_identity:ident.value})),
+    sec("Канал пользователей",["users_subscriptions","site_channel"],h("div",{},
+      h("div",{class:"hint"},"Второй балансировщик — для людей сервиса: свой пул узлов и свои режимы («пользователи: …»). Подписки отсюда не смешиваются с подписками админов. Пока список пуст, канал работает на пуле админов."),
+      usubs,h("div",{style:"margin-top:10px"},h("div",{class:"k"},"Кто регистрируется на сайте — в какой канал попадает"),siteCh)),
+      ()=>save({users_subscriptions:lines(usubs.value),site_channel:siteCh.value})),
     sec("Переключение узлов",["switch_margin","switch_confirm","probe_urls"],h("div",{},
       h("div",{class:"row"},h("div",{},h("div",{class:"k"},"Запас (раз)"),margin),h("div",{},h("div",{class:"k"},"Циклов подряд"),confirmI)),
       h("div",{class:"k",style:"margin-top:10px"},"Сайты для проверки узлов (по одному на строку)"),probes),
@@ -362,6 +383,52 @@ function expiryAsk(label){
   return {extend_days:n};
 }
 function stateChip(a){ const m={active:["активен","ok"],unlimited:["без срока","ok"],expired:["срок вышел","warn"],blocked:["заблокирован","bad"]}[a.state]||[a.state,""]; return h("span",{class:m[1]},m[0]); }
+let PROMOS=[];
+// vService: what turns the balancer into a service: promo codes, referral program, balance of the people, Telegram bot, payment callback.
+function vService(){
+  const V=(SET&&SET.values)||{};
+  const num=(v,min,max)=>h("input",{type:"number",min,max,value:v,style:"width:100px"});
+  const refDays=num(V.ref_bonus_days==null?7:V.ref_bonus_days,0,3650), refPct=num(V.ref_bonus_percent||0,0,100), refInv=num(V.ref_invitee_days||0,0,3650);
+  const hook=h("input",{value:V.pay_webhook_secret||"",placeholder:"секрет обратного вызова (пусто — выключен)",class:"grow"});
+  const tok=h("input",{value:V.bot_token||"",placeholder:"123456:ABC… от @BotFather (пусто — бота нет)",class:"grow"});
+  const botApi=h("input",{value:V.bot_api_url||"",placeholder:"https://api.telegram.org (по умолчанию)",class:"grow"});
+  const savePart=(obj,msg)=>async()=>{ try{ await api("PUT","/api/settings",obj); toast(msg||"Сохранено"); load(); }catch(e){ toast(e.message,true); } };
+  const pcode=h("input",{placeholder:"КОД",style:"width:140px"}), pkind=h("select",{style:"width:auto"},[["percent","скидка, %"],["days","дни доступа"],["balance","деньги на баланс"]].map(([v,t])=>h("option",{value:v},t)));
+  const pval=h("input",{type:"number",min:1,placeholder:"значение",style:"width:110px"}), pmax=h("input",{type:"number",min:0,placeholder:"лимит (0 = без)",style:"width:130px"}), pnote=h("input",{placeholder:"заметка",class:"grow"});
+  const addPromo=async()=>{ try{ let v=parseFloat(pval.value||"0"); if(pkind.value==="balance") v=Math.round(v*100); const r=await api("POST","/api/promos",{code:pcode.value,kind:pkind.value,value:Math.round(v),max_uses:parseInt(pmax.value||"0",10),enabled:true,note:pnote.value}); PROMOS=r.promos; toast("Промокод сохранён"); render(); }catch(e){ toast(e.message,true); } };
+  const kindName={percent:"скидка",days:"дни",balance:"на баланс"};
+  const valText=p=>p.kind==="percent"?p.value+"%":p.kind==="days"?p.value+" дн.":fmtMoneyC(p.value);
+  const promoRows=(PROMOS||[]).map(p=>h("tr",{},h("td",{class:"mono"},p.code),h("td",{},kindName[p.kind]||p.kind),h("td",{},valText(p)),h("td",{},p.used+(p.max_uses?" / "+p.max_uses:"")),
+    h("td",{},p.enabled?"действует":"выключен"),h("td",{class:"muted"},p.note||""),
+    h("td",{},h("div",{class:"row"},h("button",{class:"b s",onclick:async()=>{ try{ const r=await api("POST","/api/promos",Object.assign({},p,{enabled:!p.enabled})); PROMOS=r.promos; render(); }catch(e){ toast(e.message,true); } }},p.enabled?"Выключить":"Включить"),
+      h("button",{class:"b d",onclick:async()=>{ if(!confirm("Удалить промокод "+p.code+"?")) return; try{ const r=await api("DELETE","/api/promos/"+encodeURIComponent(p.code)); PROMOS=r.promos; render(); }catch(e){ toast(e.message,true); } }},"Удалить")))));
+  const accSel=h("select",{style:"width:auto;max-width:260px"},(ACCS||[]).map(a=>h("option",{value:a.id},a.email+" — "+fmtMoneyC(a.balance_cents||0))));
+  const delta=h("input",{type:"number",step:"0.01",placeholder:"сумма, ± (например 100 или -50)",style:"width:220px"}), bnote=h("input",{placeholder:"пояснение",class:"grow"});
+  const adjust=async()=>{ try{ await api("POST","/api/accounts/"+accSel.value+"/balance",{delta_cents:Math.round(parseFloat(delta.value||"0")*100),note:bnote.value}); toast("Баланс изменён"); load(); }catch(e){ toast(e.message,true); } };
+  const withBal=(ACCS||[]).filter(a=>a.balance_cents).length, tg=(ACCS||[]).filter(a=>a.telegram).length;
+  return h("div",{},
+    h("div",{class:"grid"},card("Промокодов",String((PROMOS||[]).length)),card("С деньгами на балансе",String(withBal)),card("Привязали Telegram",String(tg)),
+      card("Бот",V.bot_token?"включён":"выключен",V.bot_token?"ok":"muted")),
+    h("div",{class:"card"},h("h2",{},"Реферальная программа"),
+      h("div",{class:"hint"},"Награда выдаётся один раз: когда приглашённый впервые оплатил подписку. Ссылку-приглашение человек берёт в кабинете."),
+      h("div",{class:"row"},h("div",{},h("div",{class:"k"},"Пригласившему, дней"),refDays),h("div",{},h("div",{class:"k"},"Пригласившему, % от оплаты на баланс"),refPct),h("div",{},h("div",{class:"k"},"Приглашённому, дней в подарок"),refInv)),
+      h("p",{},h("button",{class:"b",onclick:savePart({ref_bonus_days:parseInt(refDays.value||"0",10),ref_bonus_percent:parseInt(refPct.value||"0",10),ref_invitee_days:parseInt(refInv.value||"0",10)})},"Сохранить"))),
+    h("div",{class:"card tw"},h("h2",{},"Промокоды"),
+      h("div",{class:"hint"},"Скидка вводится при оплате тарифа, дни и деньги — в кабинете или в боте (/promo КОД). Один код — один раз на аккаунт."),
+      h("table",{},h("tr",{},["Код","Вид","Значение","Использован","Состояние","Заметка",""].map(t=>h("th",{},t))),promoRows),
+      h("div",{class:"row",style:"margin-top:10px"},pcode,pkind,pval,pmax,pnote,h("button",{class:"b",onclick:addPromo},"Создать / изменить"))),
+    h("div",{class:"card"},h("h2",{},"Баланс человека"),
+      h("div",{class:"hint"},"Подарок, возврат или исправление: положительная сумма добавляет деньги, отрицательная списывает. Баланс не уходит ниже нуля."),
+      h("div",{class:"row"},accSel,delta,bnote,h("button",{class:"b",onclick:adjust},"Изменить баланс"))),
+    h("div",{class:"card"},h("h2",{},"Telegram-бот"),
+      h("div",{class:"hint"},"Создайте бота у @BotFather и вставьте токен. Люди привязывают аккаунт кодом из кабинета и дальше смотрят срок, берут ссылку подписки, применяют промокоды и платят. Бот работает через long polling: входящий порт не нужен."),
+      h("div",{class:"row"},tok),h("div",{class:"row",style:"margin-top:6px"},botApi),
+      h("p",{},h("button",{class:"b",onclick:savePart({bot_token:tok.value.trim(),bot_api_url:botApi.value.trim()},"Сохранено. Бот подхватит токен в течение 15 секунд")},"Сохранить"))),
+    h("div",{class:"card"},h("h2",{},"Обратный вызов платёжной системы"),
+      h("div",{class:"hint"},"Адрес: POST <сайт>/pay/webhook/<провайдер>, тело {\"payment_id\":N,\"status\":\"paid|canceled\",\"amount_cents\":N}, заголовок X-Signature = HMAC-SHA256(тело, секрет) в hex. Платёжную систему подключат позже; обработчик уже работает и ничего не делает без секрета."),
+      h("div",{class:"row"},hook),h("p",{},h("button",{class:"b",onclick:savePart({pay_webhook_secret:hook.value.trim()})},"Сохранить"))));
+}
+function fmtMoneyC(c){ const v=(c||0)/100; return (Number.isInteger(v)?String(v):v.toFixed(2)); }
 function vSite(){
   if(!SITE) return h("div",{class:"hint"},"загрузка…");
   const S=SITE.settings, c=SITE.cert;
@@ -486,7 +553,7 @@ async function showQR(title,text){
     img.src="data:image/png;base64,"+btoa(bin);
   }catch(e){ img.replaceWith(h("div",{class:"bad"},"Не удалось построить QR: "+e.message)); }
 }
-function modeName(m){ return !m?"текущий":m==="speed"?"лучшая скорость":m==="ping"?"лучший пинг":/^x\d+$/.test(m)?"внешний сервер №"+m.slice(1):m; }
+function modeName(m){ return !m?"текущий":m==="speed"?"лучшая скорость":m==="ping"?"лучший пинг":m==="spread"?"по трафику":m==="u"?"пользователи: текущий":m==="u-speed"?"пользователи: скорость":m==="u-ping"?"пользователи: пинг":/^x\d+$/.test(m)?"внешний сервер №"+m.slice(1):m; }
 // ---- external servers, categories, who may take what
 let CAT=null, UEDIT=null, UST=null;
 // selected: list of keys, or null = "inherit" (the checkbox with o.inheritLabel is on)
@@ -607,7 +674,9 @@ function userStatsCard(){
   const ses=(s.sessions&&s.sessions.length)?h("div",{class:"card tw"},h("h2",{},"Открытые подключения"),h("table",{},h("tr",{},["Адрес","Давно","Режим","↑","↓"].map(t=>h("th",{},t))),
     s.sessions.map(x=>h("tr",{},h("td",{class:"mono"},x.ip),h("td",{},fmtDur((Date.now()-Date.parse(x.since))/1000)),h("td",{},modeName(x.mode)),h("td",{},fmtBytes(x.up)),h("td",{},fmtBytes(x.down)))))):null;
   const err=s.last_error?h("div",{class:"card"},h("div",{class:"k"},"Последняя ошибка"),h("div",{class:"mono bad",style:"word-break:break-all"},s.last_error)):null;
-  return h("div",{},head,g,
+  const bysrv=(s.servers&&s.servers.length>1)?h("div",{class:"card tw"},h("h2",{},"По серверам"),h("table",{},h("tr",{},["Сервер","↓","↑"].map(x=>h("th",{},x))),
+    s.servers.map(x=>h("tr",{},h("td",{},x.name),h("td",{},fmtBytes(x.down)),h("td",{},fmtBytes(x.up)))))):null;
+  return h("div",{},head,g,bysrv,
     bars("Трафик по дням (30 дней, UTC)",s.days,{every:5,tick:p=>p.day.slice(5),label:p=>p.day}),
     bars("Трафик по часам (48 часов)",s.hours,{every:6,tick:p=>fmtT(p.t),label:p=>fmtT(p.t,true)}),ses,err);
 }
@@ -639,7 +708,7 @@ function vUsers(){
       CAT&&CAT.default_days?h("div",{class:"hint"},"Новым пользователям выдаётся срок "+CAT.default_days+" дн. (настройка по умолчанию во вкладке «Серверы»)."):null),
     h("div",{class:"card tw"},h("table",{},h("tr",{},h("th",{},"Имя"),h("th",{},"Статус"),h("th",{},"Ссылки"),h("th",{},"")),
       USERS.map(u=>h("tr",{},
-        h("td",{},u.name,h("div",{class:"muted"},"подписки: "+subSource(u)),h("div",{class:"muted"},u.sub_fetches?("скачана "+u.sub_fetches+" раз, "+fmtAgo(u.sub_fetched)):"подписку ещё не скачивали")),
+        h("td",{},h("b",{},"№"+u.id+" "+u.nick),h("div",{class:"muted"},"имя: "+u.name+" "),h("button",{class:"b s",style:"margin:2px 0",onclick:async()=>{ const n=prompt("Новый ник для №"+u.id+" (имя и номер не меняются)",u.nick); if(n===null) return; try{ USERS=await api("POST","/api/users/"+encodeURIComponent(u.name)+"/nick",{nick:n}); toast("Ник изменён"); render(); }catch(e){ toast(e.message,true);} }},"Сменить ник"),h("div",{class:"muted"},"канал: ",h("select",{style:"width:auto",onchange:async e=>{ try{ USERS=await api("POST","/api/users/"+encodeURIComponent(u.name)+"/channel",{channel:e.target.value}); toast("Канал изменён"); render(); }catch(x){ toast(x.message,true); } }},[["admin","админов"],["users","пользователей"]].map(([v,t])=>h("option",{value:v,selected:v===u.channel},t)))),h("div",{class:"muted"},"подписки: "+subSource(u)),h("div",{class:"muted"},u.sub_fetches?("скачана "+u.sub_fetches+" раз, "+fmtAgo(u.sub_fetched)):"подписку ещё не скачивали")),
         h("td",{},h("span",{class:u.block_kind?"bad":u.enabled?"ok":"muted"},u.block_kind?"заблокирован: "+({unpaid:"неуплата",ban:"бан",other:"другое"}[u.block_kind]||u.block_kind):u.enabled?"включён":"отключён"),u.block_kind&&u.block_reason?h("div",{class:"muted",style:"font-size:12px"},u.block_reason):null,h("div",{class:"muted"},u.expires?"до "+fmtDate(u.expires)+(u.expires*1000<Date.now()?" (вышел)":""):"без срока"),
           h("button",{class:"b s",style:"margin-top:4px",onclick:async()=>{ const e=expiryAsk("Срок доступа для «"+u.name+"»"); if(!e) return; try{ USERS=await api("POST","/api/users/"+encodeURIComponent(u.name)+"/expiry",e); toast("Срок изменён"); render(); }catch(x){ toast(x.message,true);} }},"Срок")),
         h("td",{},u.subscription?linkRow({title:"Подписка",link:u.subscription}):h("div",{class:"hint"},"подписки выключены (задайте домен и включите сайт или sub_listen)"),h("div",{class:"muted",style:"font-size:12px"},(u.sub_keys||[]).map(k=>(CAT&&CAT.subs.find(x=>x.key===k)||{title:k}).title).join(" · ")||"ничего не выбрано")),
@@ -676,6 +745,7 @@ function vNet(){
     h("div",{class:"card"},h("h2",{},"Сеть серверов"),
       h("p",{class:"hint"},"Балансировщики и конечные серверы, установленные отдельно, сами подключаются к панели по токену (раз в 30 секунд). Они получают список пользователей: заблокированный, отключённый или с истёкшим сроком исчезает из списка, и его соединения на этих серверах закрываются. Ссылки серверов попадают в подписки: балансировщики в «balancers», конечные серверы в «servers»; «all» включает всё."),
       h("p",{class:"hint"},"Роль этой установки: "+(NET.role==="panel"?"только панель":NET.role==="balancer"?"балансировщик":"балансировщик и панель")+". Адрес панели для серверов: "+NET.panel)),
+    netTrafficCard(),
     h("div",{class:"card"},h("h2",{},"Добавить сервер"),h("div",{class:"row"},name,kind,
       h("button",{class:"b",onclick:async()=>{ try{ NETNEW=await api("POST","/api/servers",{name:name.value,kind:kind.value}); NET=await api("GET","/api/servers"); render(); }catch(e){ toast(e.message,true); } }},"Создать и получить команду"))),
     h("div",{class:"card tw"},h("table",{},h("tr",{},h("th",{},"Сервер"),h("th",{},"Состояние"),h("th",{},"Адрес"),h("th",{},"Трафик пользователей"),h("th",{},"")),rows.length?rows:h("tr",{},h("td",{colspan:5,class:"hint"},"серверов пока нет")))));

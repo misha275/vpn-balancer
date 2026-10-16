@@ -22,6 +22,9 @@ type Node struct {
 	UDP      bool // UDP-based protocol: TCP pre-check is skipped
 	Outbound map[string]any
 
+	InAdmin bool // seen in the subscriptions of the operator's pool
+	InUsers bool // seen in the subscriptions of the users' pool
+
 	Link        string    // the original link from the subscription (for the user subscription)
 	ExitIP      string    // address the node's traffic leaves from (measured)
 	ExitCountry string    // ISO country of the exit, "" until measured

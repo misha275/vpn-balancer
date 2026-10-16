@@ -73,6 +73,9 @@ type EndNodeConfig struct {
 	AllowPrivate  bool          `yaml:"allow_private,omitempty"` // let users reach private addresses of the server's network (off by default)
 	Users         []EndUser     `yaml:"users,omitempty"`         // fixed users that work without a panel
 	Inbounds      []EndInbound  `yaml:"inbounds"`
+	StatsPort     int           `yaml:"stats_port,omitempty"` // local Clash API port the node reads per-user traffic from (default 29090)
+
+	secret string // password of that API (random on every start of the node; empty = traffic is not measured)
 }
 
 var endTypes = map[string]struct {
@@ -126,6 +129,9 @@ func LoadEndNode(path string) (*EndNodeConfig, error) {
 	}
 	if c.Name == "" {
 		c.Name = "Узел"
+	}
+	if c.StatsPort == 0 {
+		c.StatsPort = 29090
 	}
 	return c, c.Validate()
 }
@@ -395,15 +401,26 @@ func (c *EndNodeConfig) BuildConfig(users []EndUser) ([]byte, error) {
 		rules = append(rules, map[string]any{"action": "resolve"},
 			map[string]any{"ip_is_private": true, "action": "reject"}) // users must not reach the network of the server
 	}
+	outs := []any{map[string]any{"type": "direct", "tag": "direct"}}
 	cfg := map[string]any{
-		"log":       map[string]any{"level": "warn", "timestamp": true},
-		"inbounds":  ins,
-		"outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}},
-		"route": map[string]any{
-			"rules": rules,
-			"final": "direct",
-		},
+		"log":      map[string]any{"level": "warn", "timestamp": true},
+		"inbounds": ins,
 	}
+	if c.secret != "" {
+		// Traffic per user: every user goes out through an outbound of his own, and the Clash API lists the open
+		// connections together with the outbound ("chains") and their byte counters (see endstats.go).
+		for _, u := range users {
+			if u.Name == "_none" {
+				continue
+			}
+			outs = append(outs, map[string]any{"type": "direct", "tag": meterTag(u.Name)})
+			rules = append(rules, map[string]any{"auth_user": []string{u.Name}, "action": "route", "outbound": meterTag(u.Name)})
+		}
+		cfg["experimental"] = map[string]any{"clash_api": map[string]any{
+			"external_controller": fmt.Sprintf("127.0.0.1:%d", c.StatsPort), "secret": c.secret}}
+	}
+	cfg["outbounds"] = outs
+	cfg["route"] = map[string]any{"rules": rules, "final": "direct"}
 	return json.MarshalIndent(cfg, "", "  ")
 }
 
@@ -571,6 +588,9 @@ func RunEndNode(ctx context.Context, path string) error {
 	}
 	proc := NewSBProc(ctx, c.SingboxBin, c.WorkDir, "endnode")
 	defer proc.Stop()
+	c.secret = randHex(16)
+	meter := NewMeter(filepath.Join(c.WorkDir, "traffic.json"))
+	go meter.Run(ctx, func() (int, string) { return c.StatsPort, c.secret })
 	cl := panelClient(c.PanelInsecure)
 	var lastMod time.Time
 	var lastSync time.Time
@@ -581,6 +601,7 @@ func RunEndNode(ctx context.Context, path string) error {
 				if nc, err := LoadEndNode(path); err != nil {
 					fmt.Fprintf(os.Stderr, "endnode: новый конфиг отвергнут: %v (работает прежний)\n", err)
 				} else {
+					nc.secret = c.secret
 					c = nc
 					lastSync = time.Time{} // tell the panel the new links at once
 				}
@@ -591,7 +612,8 @@ func RunEndNode(ctx context.Context, path string) error {
 			lastSync = time.Now()
 			sc, cancel := context.WithTimeout(ctx, 40*time.Second)
 			us, err := PanelSync(sc, cl, c.PanelURL, c.PanelToken, SyncReport{Kind: "endnode",
-				Info: ServerInfo{Version: appVersion, Host: c.Host, Links: c.Templates(), Users: len(panelUsers)}})
+				Info:    ServerInfo{Version: appVersion, Host: c.Host, Links: c.Templates(), Users: len(panelUsers)},
+				Traffic: meter.Snapshot()})
 			cancel()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "endnode: панель недоступна: %v (остаётся прежний список пользователей)\n", scrubErr(err))

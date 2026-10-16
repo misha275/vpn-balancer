@@ -40,18 +40,24 @@ type Account struct {
 
 	BlockKind   string
 	BlockReason string
+	Nick        string
+	Balance     int64  // money on the balance, in cents
+	RefCode     string // the code of the referral link
+	ReferredBy  *int64 // the account that invited this one
+	TgChat      *int64 // the Telegram chat linked to the account
+	Channel     string // balancer channel of the VPN user
 }
 
 // User returns the VPN user of the account (for building links).
 func (a *Account) User() User {
-	return User{ID: a.UserID, Name: a.UserName, UUID: a.UUID, Enabled: a.Enabled, SubToken: a.SubToken, Expires: a.Expires, Subs: a.Subs, PlanID: a.PlanID, PlanSubs: a.PlanSubs, BlockKind: a.BlockKind, BlockReason: a.BlockReason}
+	return User{ID: a.UserID, Name: a.UserName, UUID: a.UUID, Enabled: a.Enabled, SubToken: a.SubToken, Expires: a.Expires, Subs: a.Subs, PlanID: a.PlanID, PlanSubs: a.PlanSubs, BlockKind: a.BlockKind, BlockReason: a.BlockReason, Nick: a.Nick, Channel: a.Channel}
 }
 
-const accountCols = `a.id, a.email, a.pass_hash, a.user_id, a.blocked, a.note, a.created, a.last_login, u.name, u.uuid::text, u.sub_token, u.expires_at, u.enabled, u.subs, u.plan_id, (SELECT p.subs FROM plans p WHERE p.id=u.plan_id), COALESCE(u.block_kind,''), u.block_reason`
+const accountCols = `a.id, a.email, a.pass_hash, a.user_id, a.blocked, a.note, a.created, a.last_login, u.name, u.uuid::text, u.sub_token, u.expires_at, u.enabled, u.subs, u.plan_id, (SELECT p.subs FROM plans p WHERE p.id=u.plan_id), COALESCE(u.block_kind,''), u.block_reason, u.nick, a.balance_cents, COALESCE(a.ref_code,''), a.referred_by, a.tg_chat, u.channel`
 
 func scanAccount(r pgx.Row) (*Account, error) {
 	var a Account
-	err := r.Scan(&a.ID, &a.Email, &a.PassHash, &a.UserID, &a.Blocked, &a.Note, &a.Created, &a.LastLogin, &a.UserName, &a.UUID, &a.SubToken, &a.Expires, &a.Enabled, &a.Subs, &a.PlanID, &a.PlanSubs, &a.BlockKind, &a.BlockReason)
+	err := r.Scan(&a.ID, &a.Email, &a.PassHash, &a.UserID, &a.Blocked, &a.Note, &a.Created, &a.LastLogin, &a.UserName, &a.UUID, &a.SubToken, &a.Expires, &a.Enabled, &a.Subs, &a.PlanID, &a.PlanSubs, &a.BlockKind, &a.BlockReason, &a.Nick, &a.Balance, &a.RefCode, &a.ReferredBy, &a.TgChat, &a.Channel)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -60,6 +66,14 @@ func scanAccount(r pgx.Row) (*Account, error) {
 
 // CreateAccount registers a person: a VPN user (named by the email) with trialDays of access (0 = none until a payment) and the account.
 func (s *Store) CreateAccount(ctx context.Context, email, passHash string, trialDays int) (*Account, error) {
+	return s.CreateAccountIn(ctx, email, passHash, trialDays, chanAdmin)
+}
+
+// CreateAccountIn is CreateAccount with the channel of the balancer the new user belongs to.
+func (s *Store) CreateAccountIn(ctx context.Context, email, passHash string, trialDays int, channel string) (*Account, error) {
+	if channel != chanUsers {
+		channel = chanAdmin
+	}
 	if strings.Contains(email, "~") {
 		return nil, errors.New("bad email")
 	}
@@ -76,7 +90,7 @@ func (s *Store) CreateAccount(ctx context.Context, email, passHash string, trial
 		return nil, ErrEmailTaken
 	}
 	var uid int64
-	if err := tx.QueryRow(ctx, `INSERT INTO users(name, expires_at) VALUES($1, now() + make_interval(days => $2)) RETURNING id`, email, trialDays).Scan(&uid); err != nil {
+	if err := tx.QueryRow(ctx, `INSERT INTO users(name, expires_at, channel) VALUES($1, now() + make_interval(days => $2), $3) RETURNING id`, email, trialDays, channel).Scan(&uid); err != nil {
 		return nil, err
 	}
 	var id int64
@@ -360,16 +374,18 @@ type Payment struct {
 	Provider    string     `json:"provider"`
 	Created     time.Time  `json:"created"`
 	PaidAt      *time.Time `json:"paid_at"`
+	Kind        string     `json:"kind"` // plan (a subscription) or topup (money to the balance)
+	PromoCode   string     `json:"promo_code,omitempty"`
 }
 
-const paymentCols = `p.id, p.account_id, a.email, p.plan_name, p.days, p.amount_cents, p.currency, p.status, p.provider, p.created, p.paid_at`
+const paymentCols = `p.id, p.account_id, a.email, p.plan_name, p.days, p.amount_cents, p.currency, p.status, p.provider, p.created, p.paid_at, p.kind, p.promo_code`
 
 func scanPayments(rows pgx.Rows) ([]Payment, error) {
 	defer rows.Close()
 	out := []Payment{}
 	for rows.Next() {
 		var p Payment
-		if err := rows.Scan(&p.ID, &p.AccountID, &p.Email, &p.PlanName, &p.Days, &p.AmountCents, &p.Currency, &p.Status, &p.Provider, &p.Created, &p.PaidAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.AccountID, &p.Email, &p.PlanName, &p.Days, &p.AmountCents, &p.Currency, &p.Status, &p.Provider, &p.Created, &p.PaidAt, &p.Kind, &p.PromoCode); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -379,12 +395,7 @@ func scanPayments(rows pgx.Rows) ([]Payment, error) {
 
 // CreatePayment records a pending payment for a plan (the plan is copied: later edits of the plan do not change it).
 func (s *Store) CreatePayment(ctx context.Context, accountID int64, plan Plan, provider string) (*Payment, error) {
-	var id int64
-	if err := s.pool.QueryRow(ctx, `INSERT INTO payments(account_id, plan_name, days, amount_cents, currency, provider, plan_id) VALUES($1,$2,$3,$4,$5,$6,NULLIF($7::bigint,0)) RETURNING id`,
-		accountID, plan.Name, plan.Days, plan.PriceCents, plan.Currency, provider, plan.ID).Scan(&id); err != nil {
-		return nil, err
-	}
-	return s.PaymentByID(ctx, id)
+	return s.CreatePaymentPromo(ctx, accountID, plan, provider, "")
 }
 
 func (s *Store) PaymentByID(ctx context.Context, id int64) (*Payment, error) {
@@ -412,7 +423,29 @@ func (s *Store) ListPayments(ctx context.Context, status string, accountID int64
 	return scanPayments(rows)
 }
 
-// MarkPaid confirms a pending payment and extends the period of the account. Safe to repeat: only the first call counts.
+// extendAccount adds days to the period of the account's user (a user without a period stays without), lifts the
+// block "unpaid" and, when a plan is given, makes it the user's plan.
+func extendAccount(ctx context.Context, tx pgx.Tx, accID int64, days int, planID *int64) error {
+	if days > 0 {
+		if _, err := tx.Exec(ctx, `UPDATE users SET expires_at = CASE WHEN expires_at IS NULL THEN NULL ELSE GREATEST(expires_at, now()) + make_interval(days => $2) END
+			WHERE id = (SELECT user_id FROM accounts WHERE id=$1)`, accID, days); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE users SET block_kind=NULL, block_reason='', blocked_at=NULL WHERE block_kind='unpaid' AND id = (SELECT user_id FROM accounts WHERE id=$1)`, accID); err != nil {
+		return err
+	}
+	if planID != nil { // the subscriptions of the paid plan apply from now on (a deleted plan changes nothing)
+		if _, err := tx.Exec(ctx, `UPDATE users SET plan_id=COALESCE((SELECT id FROM plans WHERE id=$2), plan_id)
+			WHERE id = (SELECT user_id FROM accounts WHERE id=$1)`, accID, *planID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// MarkPaid confirms a pending payment: a subscription extends the period of the account, a top-up goes to the balance.
+// The first paid subscription of an invited person rewards the one who invited him. Safe to repeat: only the first call counts.
 func (s *Store) MarkPaid(ctx context.Context, id int64) (bool, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -420,27 +453,27 @@ func (s *Store) MarkPaid(ctx context.Context, id int64) (bool, error) {
 	}
 	defer tx.Rollback(ctx)
 	var accID int64
-	var days int
+	var days, amount int
 	var planID *int64
-	err = tx.QueryRow(ctx, `UPDATE payments SET status='paid', paid_at=now() WHERE id=$1 AND status='pending' RETURNING account_id, days, plan_id`, id).Scan(&accID, &days, &planID)
+	var kind string
+	err = tx.QueryRow(ctx, `UPDATE payments SET status='paid', paid_at=now() WHERE id=$1 AND status='pending' RETURNING account_id, days, plan_id, kind, amount_cents`, id).Scan(&accID, &days, &planID, &kind, &amount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE users SET expires_at = CASE WHEN expires_at IS NULL THEN NULL ELSE GREATEST(expires_at, now()) + make_interval(days => $2) END
-		WHERE id = (SELECT user_id FROM accounts WHERE id=$1)`, accID, days); err != nil {
-		return false, err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE users SET block_kind=NULL, block_reason='', blocked_at=NULL WHERE block_kind='unpaid' AND id = (SELECT user_id FROM accounts WHERE id=$1)`, accID); err != nil {
-		return false, err
-	}
-	if planID != nil { // the subscriptions of the paid plan apply from now on (a deleted plan changes nothing)
-		if _, err := tx.Exec(ctx, `UPDATE users SET plan_id=COALESCE((SELECT id FROM plans WHERE id=$2), plan_id)
-			WHERE id = (SELECT user_id FROM accounts WHERE id=$1)`, accID, *planID); err != nil {
+	if kind == "topup" {
+		if err := addBalance(ctx, tx, accID, int64(amount), "topup", "пополнение", &id); err != nil {
 			return false, err
 		}
+		return true, tx.Commit(ctx)
+	}
+	if err := extendAccount(ctx, tx, accID, days, planID); err != nil {
+		return false, err
+	}
+	if err := s.rewardReferrer(ctx, tx, accID, amount); err != nil {
+		return false, err
 	}
 	return true, tx.Commit(ctx)
 }
@@ -461,24 +494,13 @@ func (s *Store) UserTrafficOf(ctx context.Context, name string) (UserTraffic, er
 	var t UserTraffic
 	err := s.pool.QueryRow(ctx, `SELECT COALESCE(SUM(up),0), COALESCE(SUM(down),0),
 		COALESCE(SUM(up) FILTER (WHERE hour > now()-interval '30 days'),0), COALESCE(SUM(down) FILTER (WHERE hour > now()-interval '30 days'),0)
-		FROM traffic_hourly WHERE user_name=$1`, name).Scan(&t.AllUp, &t.AllDown, &t.D30Up, &t.D30Down)
+		FROM traffic_all WHERE user_name=$1`, name).Scan(&t.AllUp, &t.AllDown, &t.D30Up, &t.D30Down)
 	return t, err
 }
 
-// UserUsage is the traffic of a user over all servers: this one and those that report to it (see servers.go).
+// UserUsage is the traffic of a user over all servers: this one and those that report to it (traffic_all, see servers.go).
 func (s *Store) UserUsage(ctx context.Context, name string) (UserTraffic, error) {
-	t, err := s.UserTrafficOf(ctx, name)
-	if err != nil {
-		return t, err
-	}
-	var up, down int64
-	if err := s.pool.QueryRow(ctx, `SELECT COALESCE(SUM(up),0), COALESCE(SUM(down),0) FROM server_traffic WHERE user_name=$1`, name).Scan(&up, &down); err == nil {
-		t.AllUp += up
-		t.AllDown += down
-		t.D30Up += up
-		t.D30Down += down
-	}
-	return t, nil
+	return s.UserTrafficOf(ctx, name)
 }
 
 // ---- certificate cache (golang.org/x/crypto/acme/autocert.Cache) ----
