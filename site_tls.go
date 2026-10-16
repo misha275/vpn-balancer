@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -213,8 +214,20 @@ func (s *SiteServer) shutdown() {
 	}
 }
 
+// quietLog drops the "TLS handshake error ... EOF" lines: probes, scanners and health checks open the port and close it
+// without a handshake, and that is not an error of ours. Everything else the http server complains about stays.
+type quietLog struct{}
+
+func (quietLog) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte("TLS handshake error")) {
+		return len(p), nil
+	}
+	log.Print(strings.TrimRight(string(p), "\n"))
+	return len(p), nil
+}
+
 func newSrv(addr string, h http.Handler) *http.Server {
-	return &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 16 << 10}
+	return &http.Server{Addr: addr, Handler: h, ErrorLog: log.New(quietLog{}, "http: ", 0), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 16 << 10}
 }
 
 func serve(srv *http.Server, ln net.Listener, what string) {

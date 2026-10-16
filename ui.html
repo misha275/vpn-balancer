@@ -392,7 +392,7 @@ function vService(){
   const hook=h("input",{value:V.pay_webhook_secret||"",placeholder:"секрет обратного вызова (пусто — выключен)",class:"grow"});
   const tok=h("input",{value:V.bot_token||"",placeholder:"123456:ABC… от @BotFather (пусто — бота нет)",class:"grow"});
   const botApi=h("input",{value:V.bot_api_url||"",placeholder:"https://api.telegram.org (по умолчанию)",class:"grow"});
-  const savePart=(obj,msg)=>async()=>{ try{ await api("PUT","/api/settings",obj); toast(msg||"Сохранено"); load(); }catch(e){ toast(e.message,true); } };
+  const savePart=(obj,msg)=>async()=>{ try{ await api("PUT","/api/settings",typeof obj==="function"?obj():obj); toast(msg||"Сохранено"); load(); }catch(e){ toast(e.message,true); } };
   const pcode=h("input",{placeholder:"КОД",style:"width:140px"}), pkind=h("select",{style:"width:auto"},[["percent","скидка, %"],["days","дни доступа"],["balance","деньги на баланс"]].map(([v,t])=>h("option",{value:v},t)));
   const pval=h("input",{type:"number",min:1,placeholder:"значение",style:"width:110px"}), pmax=h("input",{type:"number",min:0,placeholder:"лимит (0 = без)",style:"width:130px"}), pnote=h("input",{placeholder:"заметка",class:"grow"});
   const addPromo=async()=>{ try{ let v=parseFloat(pval.value||"0"); if(pkind.value==="balance") v=Math.round(v*100); const r=await api("POST","/api/promos",{code:pcode.value,kind:pkind.value,value:Math.round(v),max_uses:parseInt(pmax.value||"0",10),enabled:true,note:pnote.value}); PROMOS=r.promos; toast("Промокод сохранён"); render(); }catch(e){ toast(e.message,true); } };
@@ -412,7 +412,7 @@ function vService(){
     h("div",{class:"card"},h("h2",{},"Реферальная программа"),
       h("div",{class:"hint"},"Награда выдаётся один раз: когда приглашённый впервые оплатил подписку. Ссылку-приглашение человек берёт в кабинете."),
       h("div",{class:"row"},h("div",{},h("div",{class:"k"},"Пригласившему, дней"),refDays),h("div",{},h("div",{class:"k"},"Пригласившему, % от оплаты на баланс"),refPct),h("div",{},h("div",{class:"k"},"Приглашённому, дней в подарок"),refInv)),
-      h("p",{},h("button",{class:"b",onclick:savePart({ref_bonus_days:parseInt(refDays.value||"0",10),ref_bonus_percent:parseInt(refPct.value||"0",10),ref_invitee_days:parseInt(refInv.value||"0",10)})},"Сохранить"))),
+      h("p",{},h("button",{class:"b",onclick:savePart(()=>({ref_bonus_days:parseInt(refDays.value||"0",10),ref_bonus_percent:parseInt(refPct.value||"0",10),ref_invitee_days:parseInt(refInv.value||"0",10)}))},"Сохранить"))),
     h("div",{class:"card tw"},h("h2",{},"Промокоды"),
       h("div",{class:"hint"},"Скидка вводится при оплате тарифа, дни и деньги — в кабинете или в боте (/promo КОД). Один код — один раз на аккаунт."),
       h("table",{},h("tr",{},["Код","Вид","Значение","Использован","Состояние","Заметка",""].map(t=>h("th",{},t))),promoRows),
@@ -423,10 +423,10 @@ function vService(){
     h("div",{class:"card"},h("h2",{},"Telegram-бот"),
       h("div",{class:"hint"},"Создайте бота у @BotFather и вставьте токен. Люди привязывают аккаунт кодом из кабинета и дальше смотрят срок, берут ссылку подписки, применяют промокоды и платят. Бот работает через long polling: входящий порт не нужен."),
       h("div",{class:"row"},tok),h("div",{class:"row",style:"margin-top:6px"},botApi),
-      h("p",{},h("button",{class:"b",onclick:savePart({bot_token:tok.value.trim(),bot_api_url:botApi.value.trim()},"Сохранено. Бот подхватит токен в течение 15 секунд")},"Сохранить"))),
+      h("p",{},h("button",{class:"b",onclick:savePart(()=>({bot_token:tok.value.trim(),bot_api_url:botApi.value.trim()}),"Сохранено. Бот подхватит токен в течение 15 секунд")},"Сохранить"))),
     h("div",{class:"card"},h("h2",{},"Обратный вызов платёжной системы"),
       h("div",{class:"hint"},"Адрес: POST <сайт>/pay/webhook/<провайдер>, тело {\"payment_id\":N,\"status\":\"paid|canceled\",\"amount_cents\":N}, заголовок X-Signature = HMAC-SHA256(тело, секрет) в hex. Платёжную систему подключат позже; обработчик уже работает и ничего не делает без секрета."),
-      h("div",{class:"row"},hook),h("p",{},h("button",{class:"b",onclick:savePart({pay_webhook_secret:hook.value.trim()})},"Сохранить"))));
+      h("div",{class:"row"},hook),h("p",{},h("button",{class:"b",onclick:savePart(()=>({pay_webhook_secret:hook.value.trim()}))},"Сохранить"))));
 }
 function fmtMoneyC(c){ const v=(c||0)/100; return (Number.isInteger(v)?String(v):v.toFixed(2)); }
 function vSite(){
