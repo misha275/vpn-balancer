@@ -113,3 +113,30 @@ func TestScrubErrHidesTokens(t *testing.T) {
 		t.Fatalf("redact: %q", got)
 	}
 }
+
+func TestRoleValidation(t *testing.T) {
+	write := func(body string) (*Config, error) {
+		p := filepath.Join(t.TempDir(), "c.yaml")
+		os.WriteFile(p, []byte(body), 0o600)
+		return LoadConfig(p)
+	}
+	if _, err := write("role: nonsense\nreality: {}\n"); err == nil {
+		t.Error("unknown role")
+	}
+	c, err := write("role: panel\nreality:\n  private_key: abcdef\n")
+	if err != nil || c.ValidateRun() != nil {
+		t.Errorf("panel needs only a secret: %v", err)
+	}
+	c, _ = write("role: panel\n")
+	if c.ValidateRun() == nil {
+		t.Error("panel without a secret")
+	}
+	c, _ = write("role: balancer\npublic_host: h\nreality: {private_key: a, public_key: b, short_id: c}\n")
+	if c.ValidateRun() == nil {
+		t.Error("balancer without panel_url/panel_token")
+	}
+	c, _ = write("public_host: h\nreality: {private_key: a, public_key: b, short_id: c}\n")
+	if c.Role != "full" || c.ValidateRun() != nil || c.SyncInterval != 30*time.Second {
+		t.Errorf("defaults: %q %v", c.Role, c.SyncInterval)
+	}
+}

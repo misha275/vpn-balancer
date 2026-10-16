@@ -88,6 +88,19 @@ type Config struct {
 	SpreadMode     *bool         `yaml:"spread_mode"`     // show the "by traffic" balancer to users (default off)
 	SpreadInterval time.Duration `yaml:"spread_interval"` // how often the node of the mode may change (default 60s)
 
+	// --- roles and servers (servers.go, syncclient.go) ---
+	Role          string        `yaml:"role"`           // full (default: balancer + panel), panel (only the panel) or balancer (takes its users from a panel)
+	PanelURL      string        `yaml:"panel_url"`      // role balancer / end node: address of the panel, e.g. https://vpn.example.com
+	PanelToken    string        `yaml:"panel_token"`    // token of this server, issued by the panel
+	PanelInsecure bool          `yaml:"panel_insecure"` // do not check the TLS certificate of the panel (only for a self-signed one)
+	SyncInterval  time.Duration `yaml:"sync_interval"`  // how often the server asks the panel for users (default 30s)
+	ServerName    string        `yaml:"server_name"`    // how the server is named in the panel and in subscriptions
+
+	remote   []RemoteServer // servers registered in the panel (cache, see servers.go)
+	remoteAt time.Time
+
+	SubTitleStats *bool `yaml:"sub_title_stats"` // show usage and the end date in the name of the subscription (default true)
+
 	// --- backups (backup.go) ---
 	BackupDir      string        `yaml:"backup_dir"`      // default: <work_dir>/backups
 	BackupInterval time.Duration `yaml:"backup_interval"` // automatic backup period (default 24h, negative = off)
@@ -134,6 +147,11 @@ type Config struct {
 	SiteVia443       bool      `yaml:"site_via_reality"`  // serve the site on port 443 too: the gateway hands browsers over to it (Reality dest)
 	SiteHTTPListen   string    `yaml:"site_http_listen"`  // port 80: certificate challenge and redirect to HTTPS (default :80)
 	SiteHTTPSListen  string    `yaml:"site_https_listen"` // HTTPS of the site (default :8443; 443 is taken by the gateway)
+	SiteTheme        string    `yaml:"site_theme"`        // auto | light | dark: default look of the site (a visitor may choose his own)
+	SitePalette      string    `yaml:"site_palette"`      // blue | green | teal | violet | orange | rose | graphite | custom
+	SiteAccent       string    `yaml:"site_accent"`       // #rrggbb for the "custom" palette
+	ForumImages      *bool     `yaml:"forum_images"`      // may users attach pictures (up to 1 MB) to forum messages (default true; administrators always may)
+	ForumFiles       *bool     `yaml:"forum_files"`       // may users attach files (up to 10 MB) (default false)
 	SiteAllowHTTP    bool      `yaml:"site_allow_http"`   // without a domain: serve the site over plain HTTP (passwords are not encrypted!)
 	UserDefaultSubs  []string  `yaml:"user_default_subs"` // subscriptions a user may take when nothing else is set (default: balancers, all)
 	UserDefaultDays  int       `yaml:"user_default_days"` // days of access for users created in the panel (0 = unlimited)
@@ -194,6 +212,14 @@ func LoadConfig(path string) (*Config, error) {
 	def(&c.BackupInterval, 24*time.Hour)
 	defI(&c.BackupKeep, 14)
 	defS(&c.SubUserAgent, "sing-box")
+	def(&c.SyncInterval, 30*time.Second)
+	c.Role = strings.ToLower(strings.TrimSpace(c.Role))
+	if c.Role == "" {
+		c.Role = "full"
+	}
+	if c.Role != "full" && c.Role != "panel" && c.Role != "balancer" {
+		return nil, fmt.Errorf("role must be full, panel or balancer, got %q", c.Role)
+	}
 	def(&c.SubRefresh, 30*time.Minute)
 	def(&c.NodeGrace, 48*time.Hour)
 	defI(&c.InboundPort, 443)
@@ -321,6 +347,16 @@ func LoadConfig(path string) (*Config, error) {
 
 // ValidateRun catches placeholders from config.example.yaml before sing-box gives a cryptic error.
 func (c *Config) ValidateRun() error {
+	if c.Role == "panel" {
+		// the panel carries no traffic: it only needs a secret to derive its keys from
+		if c.Reality.PrivateKey == "" || strings.HasPrefix(c.Reality.PrivateKey, "<") {
+			return fmt.Errorf("reality.private_key is not set (any long random string for the role panel)")
+		}
+		return nil
+	}
+	if c.Role == "balancer" && (c.PanelURL == "" || c.PanelToken == "") {
+		return fmt.Errorf("role balancer needs panel_url and panel_token (create the server in the panel, tab «Сеть»)")
+	}
 	for name, v := range map[string]string{
 		"public_host": c.PublicHost, "reality.private_key": c.Reality.PrivateKey,
 		"reality.public_key": c.Reality.PublicKey, "reality.short_id": c.Reality.ShortID,
@@ -454,6 +490,22 @@ func overlayStored(ctx context.Context, cfg *Config, st *Store) {
 func main() {
 	cfgPath := flag.String("c", "config.yaml", "path to config")
 	flag.Parse()
+	if a := flag.Args(); len(a) > 0 && (a[0] == "endnode" || a[0] == "wgnode") {
+		// separate kinds of installation: they have their own config and no database
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		def, run := "endnode.yaml", RunEndNodeCLI
+		if a[0] == "wgnode" {
+			def, run = "wgnode.yaml", RunWGNodeCLI
+		}
+		if *cfgPath == "config.yaml" {
+			*cfgPath = def
+		}
+		if err := run(ctx, *cfgPath, a[1:]); err != nil {
+			log.Fatalf("%s: %v", a[0], err)
+		}
+		return
+	}
 	cfg, err := LoadConfig(*cfgPath)
 	if err != nil {
 		log.Fatalf("config: %v", err)
@@ -588,6 +640,14 @@ func run(ctx context.Context, cfg *Config, st *Store) {
 		log.Fatalf("admin token: %v", err)
 	}
 
+	if cfg.Role == "panel" {
+		// the panel only manages: users, plans, the site, the forum, servers that report to it. It carries no traffic
+		log.Printf("role panel: no gateway, no balancing; servers connect with their tokens (tab «Сеть»)")
+		go NewDDNS(cfg, notify).Run(ctx)
+		go BackupLoop(ctx, cfg, st, notify)
+		serveControl(ctx, cfg, st, core, chk, col, ctrlLogs, adminToken, refreshCh)
+		return
+	}
 	nodes, err := st.ActiveNodes(ctx, cfg.NodeGrace)
 	if err != nil {
 		log.Fatalf("nodes: %v", err)
@@ -671,6 +731,15 @@ func run(ctx context.Context, cfg *Config, st *Store) {
 	}()
 
 	// reconcile DB (nodes, users) -> sing-box config
+	kick := make(chan struct{}, 1)
+	if cfg.Role == "balancer" {
+		go BalancerSyncLoop(ctx, cfg, st, notify, func() {
+			select {
+			case kick <- struct{}{}:
+			default:
+			}
+		})
+	}
 	go func() {
 		t := time.NewTicker(30 * time.Second)
 		defer t.Stop()
@@ -679,6 +748,7 @@ func run(ctx context.Context, cfg *Config, st *Store) {
 			case <-ctx.Done():
 				return
 			case <-t.C:
+			case <-kick:
 			}
 			if err := wgm.Load(ctx); err != nil {
 				log.Printf("reconcile: wireguard peers: %v", err)
@@ -706,9 +776,15 @@ func run(ctx context.Context, cfg *Config, st *Store) {
 		}
 	}()
 
+	serveControl(ctx, cfg, st, core, chk, col, ctrlLogs, adminToken, refreshCh)
+}
+
+// serveControl starts the HTTP side of the controller: health, the panel API, the site, the subscription endpoint.
+func serveControl(ctx context.Context, cfg *Config, st *Store, core *Core, chk *Checker, col *Collector, ctrlLogs *LogRing, adminToken string, refreshCh chan struct{}) {
+	go st.RemoteLoop(ctx, cfg) // links of the servers that report to this panel
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		if core.Ready() {
+		if core.Ready() || cfg.Role == "panel" {
 			w.Write([]byte("ok"))
 			return
 		}

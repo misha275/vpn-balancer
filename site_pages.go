@@ -9,47 +9,31 @@ import (
 
 // The pages of the public site. Plain HTML with a little CSS; the only script copies a link to the clipboard (it carries a nonce).
 
-const siteCSS = `
-:root{--bg:#f4f6f9;--card:#fff;--text:#18202a;--muted:#667383;--line:#e1e5ea;--accent:#2563eb;--ok:#15803d;--warn:#b45309;--bad:#b91c1c;--chip:#eef1f5}
-@media (prefers-color-scheme:dark){:root{--bg:#0e1216;--card:#171c22;--text:#e7eaee;--muted:#8d97a3;--line:#2a313a;--accent:#6ea0ff;--ok:#4ade80;--warn:#fbbf24;--bad:#f87171;--chip:#222a33}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-a{color:var(--accent)}header{background:var(--card);border-bottom:1px solid var(--line)}
-.bar{max-width:880px;margin:0 auto;padding:12px 18px;display:flex;gap:14px;align-items:center;flex-wrap:wrap}
-.bar .name{font-weight:700;font-size:18px;margin-right:auto;text-decoration:none;color:var(--text)}
-main{max-width:880px;margin:0 auto;padding:22px 18px 60px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin-bottom:16px}
-h1{font-size:26px;margin:6px 0 14px}h2{font-size:18px;margin:0 0 10px}
-.muted{color:var(--muted)}.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
-.big{font-size:22px;font-weight:700}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px}
-label{display:block;margin:12px 0 4px;font-size:14px;color:var(--muted)}
-input[type=text],input[type=email],input[type=password]{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--text);font:inherit}
-.btn{display:inline-block;background:var(--accent);color:#fff;border:0;border-radius:10px;padding:10px 18px;font:inherit;cursor:pointer;text-decoration:none}
-.btn.s{background:var(--chip);color:var(--text)}.btn.sm{padding:6px 12px;font-size:14px}
-.err{background:color-mix(in srgb,var(--bad) 12%,transparent);border:1px solid var(--bad);color:var(--bad);padding:10px 14px;border-radius:10px;margin-bottom:14px}
-.note{background:color-mix(in srgb,var(--warn) 12%,transparent);border:1px solid var(--warn);color:var(--warn);padding:10px 14px;border-radius:10px;margin-bottom:14px}
-.okbox{background:color-mix(in srgb,var(--ok) 12%,transparent);border:1px solid var(--ok);color:var(--ok);padding:10px 14px;border-radius:10px;margin-bottom:14px}
-.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0}.row input{flex:1;min-width:200px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px}
-table{width:100%;border-collapse:collapse}td,th{padding:7px 6px;border-bottom:1px solid var(--line);text-align:left;font-size:14px}
-details{margin:4px 0}summary{cursor:pointer;color:var(--accent);font-size:14px}details img{display:block;margin:10px 0;background:#fff;padding:8px;border-radius:10px;width:240px;height:240px;image-rendering:pixelated}
-.plan{display:flex;flex-direction:column;gap:6px}.price{font-size:24px;font-weight:700}
-footer{max-width:880px;margin:0 auto;padding:0 18px 30px;color:var(--muted);font-size:14px}
-`
-
 const siteTplText = `
-{{define "head"}}<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="robots" content="noindex"><title>{{.Title}} · {{.Site}}</title><style>` + siteCSS + `</style></head><body>
+{{define "head"}}<!doctype html><html lang="ru" data-theme="{{.Theme}}" data-palette="{{.Palette}}"{{if .AccentStyle}} style="{{.AccentStyle}}"{{end}}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex"><title>{{.Title}} · {{.Site}}</title><link rel="stylesheet" href="/site.css?v={{.CSSVer}}"></head><body>
 <header><div class="bar"><a class="name" href="/">{{.Site}}</a>
-{{if .Email}}<a href="/cabinet">Кабинет</a><a href="/forum">Форум</a><form method="post" action="/logout" style="margin:0"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn s sm">Выйти</button></form>
-{{else}}<a href="/login">Войти</a>{{if .CanRegister}}<a class="btn sm" href="/register">Регистрация</a>{{end}}{{end}}</div></header><main>{{end}}
-{{define "foot"}}</main>{{if .Support}}<footer>{{.Support}}</footer>{{end}}
+<a href="/help">Инструкции</a>
+{{if .Email}}<a href="/cabinet">Кабинет</a><a href="/forum">Форум</a>{{else}}<a href="/login">Войти</a>{{end}}
+{{template "prefs" .}}
+{{if .Email}}<form method="post" action="/logout" style="margin:0"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn s sm">Выйти</button></form>
+{{else if .CanRegister}}<a class="btn sm" href="/register">Регистрация</a>{{end}}</div></header><main>{{end}}
+{{define "prefs"}}<details class="prefs"><summary title="Оформление">🎨</summary><div class="pop">
+<div class="lbl">Тема</div><div class="opts">{{range .ThemeOpts}}<a{{if .On}} class="on"{{end}} href="/prefs?theme={{.ID}}&back={{$.Path}}" rel="nofollow">{{.Icon}} {{.Title}}</a>{{end}}</div>
+<div class="lbl">Цвет</div><div class="opts">{{range .PaletteOpts}}<a{{if .On}} class="on"{{end}} href="/prefs?palette={{.ID}}&back={{$.Path}}" rel="nofollow"><span class="dot" style="background:{{.Color}}"></span>{{.Title}}</a>{{end}}</div>
+<div class="lbl"><a href="/prefs?reset=1&back={{.Path}}" rel="nofollow">Вернуть как задумано</a></div></div></details>{{end}}
+{{define "foot"}}</main><footer>{{if .Support}}<span>{{.Support}}</span>{{end}}<a href="/help">Инструкции</a>{{if .Email}}<a href="/forum">Форум</a>{{end}}</footer>
 <script nonce="{{.Nonce}}">document.addEventListener("click",function(e){var b=e.target.closest("[data-copy]");if(!b)return;var t=document.getElementById(b.dataset.copy).value;
 (navigator.clipboard?navigator.clipboard.writeText(t):Promise.reject()).then(function(){b.textContent="Скопировано"},function(){var i=document.getElementById(b.dataset.copy);i.select();document.execCommand&&document.execCommand("copy");b.textContent="Скопировано"});});</script>
 </body></html>{{end}}
 
 {{define "home"}}{{template "head" .}}
-<div class="card"><h1>{{.Site}}</h1><p>Быстрый и стабильный VPN. Зарегистрируйтесь, получите ссылку на подписку и подключите её в приложении за минуту.</p>
-{{if .Email}}<a class="btn" href="/cabinet">Открыть кабинет</a>{{else}}{{if .CanRegister}}<a class="btn" href="/register">Зарегистрироваться{{if .Trial}} (бесплатно {{.Trial}}){{end}}</a> {{end}}<a class="btn s" href="/login">Войти</a>{{end}}</div>
+<div class="hero"><h1>{{.Site}}</h1><p>Быстрый и стабильный VPN. Зарегистрируйтесь, получите ссылку на подписку и подключите её в приложении за минуту.</p>
+{{if .Email}}<a class="btn" href="/cabinet">Открыть кабинет</a>{{else}}{{if .CanRegister}}<a class="btn" href="/register">Зарегистрироваться{{if .Trial}} (бесплатно {{.Trial}}){{end}}</a> {{end}}<a class="btn s" href="/login">Войти</a>{{end}}
+<a class="btn s" href="/help">Как подключиться</a></div>
+<div class="feat"><div><b>Сам выбирает лучший сервер</b><span class="muted">Балансировщик следит за узлами и переключается, если один из них упал.</span></div>
+<div><b>Подключение за минуту</b><span class="muted">Одна ссылка-подписка для всех ваших устройств, QR-код для телефона.</span></div>
+<div><b>Личный кабинет</b><span class="muted">Срок подписки, трафик и платежи на одной странице.</span></div></div>
 {{if .Plans}}<h2>Тарифы</h2><div class="grid">{{range .Plans}}<div class="card plan"><div>{{.Name}}</div><div class="price">{{.Price}}</div><div class="muted">{{.Days}} дн.</div>{{if .Has}}<div class="muted" style="font-size:13px;margin-top:6px">{{range $i, $h := .Has}}{{if $i}}, {{end}}{{$h}}{{end}}</div>{{end}}</div>{{end}}</div>{{end}}
 {{template "foot" .}}{{end}}
 

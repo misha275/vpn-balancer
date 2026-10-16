@@ -292,7 +292,7 @@ func TestAdminSubsAPI(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("bundle: %d %s", code, raw)
 	}
-	if subs := m["subs"].([]any); len(subs) != 3 || subs[2].(map[string]any)["key"] != "b:games" {
+	if subs := m["subs"].([]any); len(subs) != 4 || subs[3].(map[string]any)["key"] != "b:games" {
 		t.Fatalf("catalog subs: %v", m["subs"])
 	}
 	if code, _, _ := h.do("POST", "/api/bundles", map[string]any{"slug": "games", "name": "dup", "enabled": true}); code != 400 {

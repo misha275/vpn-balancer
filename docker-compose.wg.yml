@@ -1,0 +1,17 @@
+# Режим установщика «wg»: WireGuard-узел. Устройства дома (например 192.168.0.0/24) -> этот сервер -> выбранный
+# сервер из подписки. Другого выхода нет.
+services:
+  wg:
+    build: .
+    image: vpnb-wgnode
+    restart: always
+    entrypoint: ["balancer", "-c", "/etc/wgnode/wgnode.yaml"]
+    command: ["wgnode", "run"]
+    ports:
+      - "51820:51820/udp"   # порт WireGuard (wg_port в wgnode.yaml; при смене порта поправьте и эту строку)
+    volumes:
+      - ./wgnode:/etc/wgnode
+      - wg-data:/var/lib/wgnode
+
+volumes:
+  wg-data:

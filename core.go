@@ -63,7 +63,9 @@ func (c *Core) RecentlyChanged(d time.Duration) bool {
 
 func NewCore(cfg *Config) *Core {
 	c := &Core{cfg: cfg, http: &http.Client{Timeout: 5 * time.Second}}
-	if cfg.Gateway == "external" {
+	if cfg.Role == "panel" {
+		c.gw = nullGateway{}
+	} else if cfg.Gateway == "external" {
 		g, err := newRemoteGateway(cfg)
 		if err != nil {
 			log.Fatalf("config: %v", err)

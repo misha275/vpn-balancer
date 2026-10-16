@@ -238,3 +238,51 @@ CREATE TABLE IF NOT EXISTS forum_posts (
     created    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS forum_posts_topic ON forum_posts (topic_id, id);
+
+-- Servers that report to this panel (balancer-only and end-node installations, see servers.go).
+CREATE TABLE IF NOT EXISTS servers (
+    id         BIGSERIAL PRIMARY KEY,
+    name       TEXT NOT NULL UNIQUE,
+    kind       TEXT NOT NULL CHECK (kind IN ('balancer','endnode')),
+    token_hash TEXT NOT NULL,
+    enabled    BOOLEAN NOT NULL DEFAULT true,
+    info       JSONB NOT NULL DEFAULT '{}',
+    last_seen  TIMESTAMPTZ,
+    created    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    note       TEXT NOT NULL DEFAULT ''
+);
+-- Traffic of users on those servers (the server reports its totals; the panel keeps the last report).
+CREATE TABLE IF NOT EXISTS server_traffic (
+    server_id BIGINT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+    user_name TEXT NOT NULL,
+    up        BIGINT NOT NULL DEFAULT 0,
+    down      BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (server_id, user_name)
+);
+
+-- Pictures and files attached to forum messages (forum_files.go).
+CREATE TABLE IF NOT EXISTS forum_files (
+    id      BIGSERIAL PRIMARY KEY,
+    post_id BIGINT NOT NULL REFERENCES forum_posts(id) ON DELETE CASCADE,
+    account_id BIGINT REFERENCES accounts(id) ON DELETE SET NULL,
+    kind    TEXT NOT NULL CHECK (kind IN ('image','file')),
+    name    TEXT NOT NULL,
+    mime    TEXT NOT NULL,
+    size    BIGINT NOT NULL,
+    data    BYTEA NOT NULL,
+    created TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS forum_files_post ON forum_files(post_id);
+CREATE INDEX IF NOT EXISTS forum_files_acc ON forum_files(account_id);
+
+-- Pages of the instructions section of the site (site_help.go).
+CREATE TABLE IF NOT EXISTS site_pages (
+    slug      TEXT PRIMARY KEY,
+    title     TEXT NOT NULL,
+    body      TEXT NOT NULL DEFAULT '',
+    sort      INT NOT NULL DEFAULT 0,
+    published BOOLEAN NOT NULL DEFAULT true,
+    updated   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS synced BOOLEAN NOT NULL DEFAULT false;

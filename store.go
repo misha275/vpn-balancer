@@ -89,6 +89,9 @@ func NewStore(ctx context.Context, url string) (*Store, error) {
 		return nil, err
 	}
 	st := &Store{pool}
+	if err := st.seedPages(ctx); err != nil {
+		return nil, err
+	}
 	if err := st.seedPlans(ctx); err != nil {
 		return nil, err
 	}

@@ -39,12 +39,13 @@ type ForumTopic struct {
 }
 
 type ForumPost struct {
-	ID      int64  `json:"id"`
-	Author  string `json:"author"`
-	Staff   bool   `json:"staff"`
-	Body    string `json:"body"`
-	Hidden  bool   `json:"hidden"`
-	Created int64  `json:"created"`
+	ID      int64       `json:"id"`
+	Author  string      `json:"author"`
+	Staff   bool        `json:"staff"`
+	Body    string      `json:"body"`
+	Hidden  bool        `json:"hidden"`
+	Created int64       `json:"created"`
+	Files   []ForumFile `json:"files"`
 }
 
 func authorLabel(accID *int64, staff bool) string {
@@ -81,6 +82,10 @@ func cleanForumText(s string, min, max int, what string) (string, error) {
 }
 
 func (s *Store) CreateTopic(ctx context.Context, accID int64, kind, title, body string) (int64, error) {
+	return s.CreateTopicA(ctx, accID, kind, title, body, nil)
+}
+
+func (s *Store) CreateTopicA(ctx context.Context, accID int64, kind, title, body string, atts []Attachment) (int64, error) {
 	if _, ok := forumKinds[kind]; !ok {
 		return 0, errors.New("неизвестный вид темы")
 	}
@@ -100,7 +105,11 @@ func (s *Store) CreateTopic(ctx context.Context, accID int64, kind, title, body 
 	if err := tx.QueryRow(ctx, `INSERT INTO forum_topics(account_id,kind,title) VALUES($1,$2,$3) RETURNING id`, accID, kind, title).Scan(&id); err != nil {
 		return 0, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO forum_posts(topic_id,account_id,body) VALUES($1,$2,$3)`, id, accID, body); err != nil {
+	var pid int64
+	if err := tx.QueryRow(ctx, `INSERT INTO forum_posts(topic_id,account_id,body) VALUES($1,$2,$3) RETURNING id`, id, accID, body).Scan(&pid); err != nil {
+		return 0, err
+	}
+	if err := addFiles(ctx, tx, pid, &accID, atts); err != nil {
 		return 0, err
 	}
 	return id, tx.Commit(ctx)
@@ -108,7 +117,15 @@ func (s *Store) CreateTopic(ctx context.Context, accID int64, kind, title, body 
 
 // AddPost adds an answer. A user cannot write to a closed or hidden topic; the administrator can write to a closed one.
 func (s *Store) AddPost(ctx context.Context, topicID int64, accID *int64, staff bool, body string) error {
-	body, err := cleanForumText(body, 2, forumBodyMax, "сообщение")
+	return s.AddPostA(ctx, topicID, accID, staff, body, nil)
+}
+
+func (s *Store) AddPostA(ctx context.Context, topicID int64, accID *int64, staff bool, body string, atts []Attachment) error {
+	min := 2
+	if staff && len(atts) > 0 {
+		min = 0 // a staff message may be just a file
+	}
+	body, err := cleanForumText(body, min, forumBodyMax, "сообщение")
 	if err != nil {
 		return err
 	}
@@ -123,11 +140,22 @@ func (s *Store) AddPost(ctx context.Context, topicID int64, accID *int64, staff 
 	if !staff && (hidden || status == "closed") {
 		return errors.New("тема закрыта")
 	}
-	if _, err := s.pool.Exec(ctx, `INSERT INTO forum_posts(topic_id,account_id,staff,body) VALUES($1,$2,$3,$4)`, topicID, accID, staff, body); err != nil {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
 		return err
 	}
-	_, err = s.pool.Exec(ctx, `UPDATE forum_topics SET last_post=now() WHERE id=$1`, topicID)
-	return err
+	defer tx.Rollback(ctx)
+	var pid int64
+	if err := tx.QueryRow(ctx, `INSERT INTO forum_posts(topic_id,account_id,staff,body) VALUES($1,$2,$3,$4) RETURNING id`, topicID, accID, staff, body).Scan(&pid); err != nil {
+		return err
+	}
+	if err := addFiles(ctx, tx, pid, accID, atts); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE forum_topics SET last_post=now() WHERE id=$1`, topicID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Store) ListTopics(ctx context.Context, withHidden bool, limit, offset int) ([]ForumTopic, error) {
@@ -181,8 +209,23 @@ func (s *Store) GetTopic(ctx context.Context, id int64, withHidden bool) (*Forum
 		p.Author, p.Created = authorLabel(pacc, p.Staff), pc.Unix()
 		posts = append(posts, p)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	rows.Close()
+	ids := make([]int64, len(posts))
+	for i := range posts {
+		ids[i] = posts[i].ID
+	}
+	files, err := s.filesOfPosts(ctx, ids)
+	if err != nil {
+		return nil, nil, err
+	}
+	for i := range posts {
+		posts[i].Files = files[posts[i].ID]
+	}
 	t.Posts = len(posts)
-	return &t, posts, rows.Err()
+	return &t, posts, nil
 }
 
 // TopicOp is a moderation action: close, open, pin, unpin, hide, show.
@@ -242,6 +285,7 @@ type forumTopicView struct {
 type forumPostView struct {
 	Author, Body, Created string
 	Staff                 bool
+	Images, Files         []ForumFile
 }
 type forumData struct {
 	Topics              []forumTopicView
@@ -253,7 +297,12 @@ type forumData struct {
 	Kinds               [][2]string
 	FormKind            string
 	FormTitle, FormBody string
+	AllowImages         bool
+	AllowFiles          bool
 }
+
+// ForumMultipart is true when the forms carry attachments.
+func (f forumData) Multipart() bool { return f.AllowImages || f.AllowFiles }
 
 var forumKindOrder = []string{"bug", "question", "idea", "other"}
 
@@ -309,6 +358,7 @@ func (s *Site) forumNewPage(w http.ResponseWriter, r *http.Request) {
 	}
 	d := s.base(r, acc, h, "Новая тема")
 	d.Forum = forumData{Kinds: forumKindList(), FormKind: "bug"}
+	s.forumPerms(&d.Forum)
 	s.render(w, 200, "forum_new", d)
 }
 
@@ -320,6 +370,7 @@ func (s *Site) forumNewPost(w http.ResponseWriter, r *http.Request) {
 	d := s.base(r, acc, h, "Новая тема")
 	kind, title, body := r.PostForm.Get("kind"), r.PostForm.Get("title"), r.PostForm.Get("body")
 	d.Forum = forumData{Kinds: forumKindList(), FormKind: kind, FormTitle: title, FormBody: body}
+	s.forumPerms(&d.Forum)
 	fail := func(code int, msg string) {
 		d.Error = msg
 		s.render(w, code, "forum_new", d)
@@ -328,7 +379,12 @@ func (s *Site) forumNewPost(w http.ResponseWriter, r *http.Request) {
 		fail(429, "Слишком много сообщений. Попробуйте позже")
 		return
 	}
-	id, err := s.st.CreateTopic(r.Context(), acc.ID, kind, title, body)
+	atts, err := s.formAttachments(r, acc)
+	if err != nil {
+		fail(400, err.Error())
+		return
+	}
+	id, err := s.st.CreateTopicA(r.Context(), acc.ID, kind, title, body, atts)
 	if err != nil {
 		fail(400, err.Error())
 		return
@@ -356,8 +412,17 @@ func (s *Site) renderTopic(w http.ResponseWriter, r *http.Request, acc *Account,
 	d := s.base(r, acc, h, t.Title)
 	d.Error = errMsg
 	f := forumData{Topic: topicView(*t), FormBody: draft}
+	s.forumPerms(&f)
 	for _, p := range posts {
-		f.Posts = append(f.Posts, forumPostView{Author: p.Author, Body: p.Body, Created: fmtForumTime(p.Created), Staff: p.Staff})
+		v := forumPostView{Author: p.Author, Body: p.Body, Created: fmtForumTime(p.Created), Staff: p.Staff}
+		for _, fl := range p.Files {
+			if fl.Kind == "image" {
+				v.Images = append(v.Images, fl)
+			} else {
+				v.Files = append(v.Files, fl)
+			}
+		}
+		f.Posts = append(f.Posts, v)
 	}
 	d.Forum = f
 	s.render(w, code, "forum_topic", d)
@@ -373,7 +438,12 @@ func (s *Site) forumReply(w http.ResponseWriter, r *http.Request) {
 		s.renderTopic(w, r, acc, h, 429, "Слишком много сообщений. Попробуйте позже", r.PostForm.Get("body"))
 		return
 	}
-	if err := s.st.AddPost(r.Context(), id, &acc.ID, false, r.PostForm.Get("body")); err != nil {
+	atts, aerr := s.formAttachments(r, acc)
+	if aerr != nil {
+		s.renderTopic(w, r, acc, h, 400, aerr.Error(), r.PostForm.Get("body"))
+		return
+	}
+	if err := s.st.AddPostA(r.Context(), id, &acc.ID, false, r.PostForm.Get("body"), atts); err != nil {
 		code := 400
 		if errors.Is(err, ErrNotFound) {
 			code = 404
@@ -385,7 +455,13 @@ func (s *Site) forumReply(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/forum/"+strconv.FormatInt(id, 10)+"#last", http.StatusSeeOther)
 }
 
+func (s *Site) forumPerms(f *forumData) {
+	sc := s.cfg.getSite()
+	f.AllowImages, f.AllowFiles = sc.ForumImages, sc.ForumFiles
+}
+
 func (s *Site) registerForum(mux *http.ServeMux) {
+	mux.HandleFunc("GET /forum/file/{id}", s.forumFile)
 	mux.HandleFunc("GET /forum", s.forumList)
 	mux.HandleFunc("GET /forum/new", s.forumNewPage)
 	mux.HandleFunc("POST /forum/new", s.forumNewPost)
@@ -404,13 +480,17 @@ const forumTplText = `
 <div class="row">{{if .Forum.Prev}}<a class="btn s sm" href="/forum?p={{.Forum.Prev}}">← Новее</a>{{end}}{{if .Forum.Next}}<a class="btn s sm" href="/forum?p={{.Forum.Next}}">Старее →</a>{{end}}</div></div>
 {{template "foot" .}}{{end}}
 
+{{define "attach"}}{{if .Forum.AllowImages}}<label for="img">Картинка (PNG, JPEG, GIF или WebP, до 1 МБ; не обязательно)</label><input id="img" type="file" name="image" accept="image/png,image/jpeg,image/gif,image/webp">{{end}}
+{{if .Forum.AllowFiles}}<label for="fil">Файл (до 10 МБ; не обязательно)</label><input id="fil" type="file" name="file">{{end}}{{end}}
+
 {{define "forum_new"}}{{template "head" .}}
 <div class="card"><h1>Новая тема</h1>{{if .Error}}<div class="err">{{.Error}}</div>{{end}}
-<form method="post" action="/forum/new"><input type="hidden" name="csrf" value="{{.CSRF}}">
+<form method="post" action="/forum/new"{{if .Forum.Multipart}} enctype="multipart/form-data"{{end}}><input type="hidden" name="csrf" value="{{.CSRF}}">
 <label for="kind">Тип</label><select id="kind" name="kind" style="padding:10px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--text)">{{$k := .Forum.FormKind}}{{range .Forum.Kinds}}<option value="{{index . 0}}"{{if eq (index . 0) $k}} selected{{end}}>{{index . 1}}</option>{{end}}</select>
 <label for="title">Заголовок</label><input id="title" type="text" name="title" value="{{.Forum.FormTitle}}" required maxlength="120">
 <label for="body">Что случилось (приложение, устройство, что делали, что увидели)</label>
 <textarea id="body" name="body" required maxlength="4000" rows="8" style="width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--text);font:inherit">{{.Forum.FormBody}}</textarea>
+{{template "attach" .}}
 <p class="muted" style="font-size:13px">Не публикуйте ссылку подписки, ключи и пароли.</p>
 <p><button class="btn">Создать</button> <a class="btn s" href="/forum">Отмена</a></p></form></div>
 {{template "foot" .}}{{end}}
@@ -419,11 +499,13 @@ const forumTplText = `
 <p><a href="/forum">← Все темы</a></p>
 <h1 style="margin-bottom:4px">{{if .Forum.Topic.Pinned}}📌 {{end}}{{.Forum.Topic.Title}}</h1>
 <div class="muted" style="margin-bottom:14px">{{.Forum.Topic.Kind}} · {{.Forum.Topic.Author}} · {{.Forum.Topic.Created}} · {{.Forum.Topic.Status}}</div>
-{{range .Forum.Posts}}<div class="card"{{if .Staff}} style="border-color:var(--accent)"{{end}}><div class="muted" style="font-size:13px"><b>{{.Author}}</b> · {{.Created}}</div><div style="white-space:pre-wrap;word-break:break-word;margin-top:6px">{{.Body}}</div></div>{{end}}
+{{range .Forum.Posts}}<div class="post{{if .Staff}} staff{{end}}"><div class="who"><b>{{.Author}}</b>{{if .Staff}} <span class="badge acc">поддержка</span>{{end}} · {{.Created}}</div>{{if .Body}}<div class="body">{{.Body}}</div>{{end}}
+{{if or .Images .Files}}<div class="att">{{range .Images}}<a href="/forum/file/{{.ID}}" target="_blank" rel="noopener"><img loading="lazy" alt="{{.Name}}" src="/forum/file/{{.ID}}"></a>{{end}}{{range .Files}}<a class="file" href="/forum/file/{{.ID}}">📎 {{.Name}} <span class="muted">{{.SizeText}}</span></a>{{end}}</div>{{end}}</div>{{end}}
 <span id="last"></span>
 {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
-{{if .Forum.Topic.Open}}<div class="card"><form method="post" action="/forum/{{.Forum.Topic.ID}}/reply"><input type="hidden" name="csrf" value="{{.CSRF}}">
+{{if .Forum.Topic.Open}}<div class="card"><form method="post" action="/forum/{{.Forum.Topic.ID}}/reply"{{if .Forum.Multipart}} enctype="multipart/form-data"{{end}}><input type="hidden" name="csrf" value="{{.CSRF}}">
 <label for="body">Ответ</label><textarea id="body" name="body" required maxlength="4000" rows="5" style="width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--text);font:inherit">{{.Forum.FormBody}}</textarea>
+{{template "attach" .}}
 <p><button class="btn">Отправить</button></p></form></div>{{else}}<p class="muted">Тема закрыта.</p>{{end}}
 {{template "foot" .}}{{end}}
 `

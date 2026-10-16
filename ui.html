@@ -119,8 +119,9 @@ $("#logout").onclick=()=>logout(false);
 $("#tokgo").onclick=async()=>{ TOKEN=$("#tok").value.trim(); try{ await api("GET","/api/overview"); sessionStorage.setItem("tok",TOKEN); start(); }catch(e){ $("#tokerr").textContent=e.message; } };
 $("#tok").addEventListener("keydown",e=>{ if(e.key==="Enter") $("#tokgo").click(); });
 
-const TABS=[["overview","Обзор"],["server","Сервер"],["clients","Клиенты"],["nodes","Узлы"],["settings","Настройки"],["users","Пользователи"],["subs","Серверы"],["wg","WireGuard"],["site","Сайт"],["forum","Форум"],["backup","Бэкапы"],["console","Консоль"]];
-function renderNav(){ const n=$("#nav"); n.replaceChildren(...TABS.map(([id,t])=>h("button",{class:id===TAB?"on":"",onclick:()=>{TAB=id;load();}},t))); }
+const TABS=[["overview","Обзор"],["server","Сервер"],["clients","Клиенты"],["nodes","Узлы"],["settings","Настройки"],["users","Пользователи"],["subs","Серверы"],["net","Сеть"],["wg","WireGuard"],["site","Сайт"],["forum","Форум"],["backup","Бэкапы"],["console","Консоль"]];
+const PANEL_HIDE=["overview","server","clients","nodes","wg"]; // the role "panel" has no gateway
+function renderNav(){ const n=$("#nav"); n.replaceChildren(...TABS.filter(([id])=>!(DATA&&DATA.role==="panel"&&PANEL_HIDE.includes(id))).map(([id,t])=>h("button",{class:id===TAB?"on":"",onclick:()=>{TAB=id;load();}},t))); }
 
 async function load(){
   renderNav();
@@ -129,20 +130,23 @@ async function load(){
     if (TAB==="settings"){ SET=await api("GET","/api/settings"); }
     if (TAB==="users"){ [USERS,CAT,PLANS]=await Promise.all([api("GET","/api/users"),api("GET","/api/catalog"),api("GET","/api/plans")]); if(UEDIT&&UEDIT.mode==="stats"){ try{ UST=await api("GET","/api/users/"+encodeURIComponent(UEDIT.name)+"/stats"); }catch(e){ UST=null; } } }
     if (TAB==="subs"){ CAT=await api("GET","/api/catalog"); }
+    if (TAB==="net"){ NET=await api("GET","/api/servers"); }
     if (TAB==="wg"){ WG=await api("GET","/api/wg"); }
-    if (TAB==="site"){ [SITE,PLANS,ACCS,PAYS,CAT]=await Promise.all([api("GET","/api/site"),api("GET","/api/plans"),api("GET","/api/accounts"),api("GET","/api/payments"),api("GET","/api/catalog")]); }
+    if (TAB==="site"){ [SITE,PLANS,ACCS,PAYS,CAT,PAGES]=await Promise.all([api("GET","/api/site"),api("GET","/api/plans"),api("GET","/api/accounts"),api("GET","/api/payments"),api("GET","/api/catalog"),api("GET","/api/site/pages").then(r=>r.pages)]); }
     if (TAB==="backup"){ BK=await api("GET","/api/backups"); }
     if (TAB==="forum"){ FORUM=await api("GET","/api/forum/topics"); if(FTOPIC){ try{ FTOPIC=await api("GET","/api/forum/topics/"+FTOPIC.topic.id); }catch(e){ FTOPIC=null; } } }
     if (TAB==="server"){ [STAT,HIST]=await Promise.all([api("GET","/api/stats"),api("GET","/api/stats/history?range="+RANGE)]); }
     if (TAB==="clients"){ STAT=await api("GET","/api/stats"); }
     if (!DATA) DATA=await api("GET","/api/overview");
   }catch(e){ if(TOKEN) toast(e.message,true); return; }
+  if (DATA.role==="panel" && PANEL_HIDE.includes(TAB)){ TAB="users"; return load(); }
   const s=DATA.snapshot, st=$("#state");
+  if (DATA.role==="panel"){ st.textContent="панель"; st.className="pill ok"; return render(); }
   st.textContent = !DATA.ready ? "sing-box не отвечает" : s.net_down ? "нет связи у сервера" : "работает";
   st.className="pill "+(!DATA.ready||s.net_down?"bad":"ok");
   render();
 }
-function render(){ const m=$("#main"); m.replaceChildren(({overview:vOverview,server:vServer,clients:vClients,nodes:vNodes,settings:vSettings,users:vUsers,subs:vSubs,wg:vWG,site:vSite,forum:vForum,backup:vBackup,console:vConsole})[TAB]()); }
+function render(){ const m=$("#main"); m.replaceChildren(({overview:vOverview,server:vServer,clients:vClients,nodes:vNodes,settings:vSettings,users:vUsers,subs:vSubs,net:vNet,wg:vWG,site:vSite,forum:vForum,backup:vBackup,console:vConsole})[TAB]()); }
 
 function fmtSpeed(k){ return k>0? (k>=1000? (k/1000).toFixed(0)+" Мбит/с": k+" кбит/с") : "—"; }
 function nodeStatus(n){
@@ -366,9 +370,14 @@ function vSite(){
   const f={enabled:chk("f-en",S.site_enabled),domain:inp("f-dom",S.site_domain,"vpn.example.com"),email:inp("f-mail",S.site_email,"admin@example.com"),name:inp("f-name",S.site_name),
     support:h("textarea",{style:"min-height:60px"},S.site_support||""),reg:chk("f-reg",S.site_registration),trial:h("input",{type:"number",min:0,max:365,value:S.site_trial_days,style:"width:90px"}),
     pay:h("select",{style:"width:auto"},[["manual","заявка, подтверждает админ"],["stub_auto","тест: оплачено сразу"],["off","оплата выключена"]].map(([v,t])=>h("option",{value:v,selected:v===S.site_payment},t))),
-    stg:chk("f-stg",S.site_acme_staging),via:chk("f-via",S.site_via_reality)};
+    stg:chk("f-stg",S.site_acme_staging),via:chk("f-via",S.site_via_reality),
+    theme:h("select",{style:"width:auto"},[["auto","как на устройстве"],["light","светлая"],["dark","тёмная"]].map(([v,t])=>h("option",{value:v,selected:v===(S.site_theme||"auto")},t))),
+    pal:h("select",{style:"width:auto"},[["blue","синяя"],["green","зелёная"],["teal","бирюзовая"],["violet","фиолетовая"],["orange","оранжевая"],["rose","розовая"],["graphite","графит"],["custom","свой цвет"]].map(([v,t])=>h("option",{value:v,selected:v===(S.site_palette||"blue")},t))),
+    accent:h("input",{type:"color",value:/^#[0-9a-fA-F]{6}$/.test(S.site_accent||"")?S.site_accent:"#2563eb",style:"width:60px;padding:2px"}),
+    fimg:chk("f-fimg",S.forum_images),ffil:chk("f-ffil",S.forum_files)};
   const saveSite=()=>save({site_enabled:f.enabled.checked,site_domain:f.domain.value.trim(),site_email:f.email.value.trim(),site_name:f.name.value.trim(),site_support:f.support.value.trim(),
-    site_registration:f.reg.checked,site_trial_days:parseInt(f.trial.value||"0",10),site_payment:f.pay.value,site_acme_staging:f.stg.checked,site_via_reality:f.via.checked}).then(()=>load());
+    site_registration:f.reg.checked,site_trial_days:parseInt(f.trial.value||"0",10),site_payment:f.pay.value,site_acme_staging:f.stg.checked,site_via_reality:f.via.checked,
+    site_theme:f.theme.value,site_palette:f.pal.value,site_accent:f.pal.value==="custom"?f.accent.value:"",forum_images:f.fimg.checked,forum_files:f.ffil.checked}).then(()=>load());
   const certBox=()=>{
     if(!S.site_enabled) return h("div",{class:"muted"},"Сайт выключен.");
     if(c.message) return h("div",{class:"warn"},c.message);
@@ -414,6 +423,14 @@ function vSite(){
       h("div",{class:"hint"},"Шлюз будет отдавать сайт браузерам на 443, а VPN-клиенты с ключом продолжат подключаться. Включается, только когда сертификат уже выпущен; ссылки пользователей получат домен вместо маскировки (клиентам нужно обновить подписку). Необязательно."),
       h("div",{class:"row",style:"margin-top:8px"},f.stg,h("label",{for:"f-stg"},"Тестовые сертификаты (для проверки, браузер им не доверяет)")),
       h("p",{},h("button",{class:"b",onclick:saveSite},"Сохранить"))),
+    h("div",{class:"card"},h("h2",{},"Оформление сайта и форум"),
+      h("div",{class:"row"},h("span",{class:"muted"},"Тема по умолчанию:"),f.theme,h("span",{class:"muted"},"Цвет:"),f.pal,f.accent),
+      h("div",{class:"hint"},"Каждый посетитель может выбрать свою тему и цвет кнопкой 🎨 в шапке сайта; здесь задаётся вид по умолчанию. «Свой цвет» берётся из выбора справа."),
+      h("div",{class:"row",style:"margin-top:8px"},f.fimg,h("label",{for:"f-fimg"},"Пользователи могут прикладывать картинки на форуме (до 1 МБ)")),
+      h("div",{class:"row"},f.ffil,h("label",{for:"f-ffil"},"Пользователи могут прикладывать файлы на форуме (до 10 МБ)")),
+      h("div",{class:"hint"},"Администратор прикладывает файлы без ограничений (вкладка «Форум»). Файлы видят только вошедшие на сайт пользователи. На каждый аккаунт приходится не больше 100 МБ вложений."),
+      h("p",{},h("button",{class:"b",onclick:saveSite},"Сохранить"))),
+    pagesCard(),
     bulk,
     h("div",{class:"card tw"},h("h2",{},"Тарифы"),h("table",{},h("tr",{},["Название","Дней","Цена","Порядок","Включён","Подписки тарифа",""].map(t=>h("th",{},t))),
       PLANS.map(planRow),planRow({id:0,name:"",days:30,price_cents:0,currency:"RUB",enabled:true,sort:PLANS.length,subs:null})),h("div",{class:"hint"},"У тарифа свой набор подписок (в том числе категорий серверов). Он включается пользователю после оплаты этого тарифа; личный список пользователя важнее. Категории создаются во вкладке «Серверы».")),
@@ -440,6 +457,21 @@ function vSite(){
             h("button",{class:"b d",onclick:()=>{ if(confirm("Удалить аккаунт "+a.email+" вместе с ключом, статистикой и платежами?")) siteAct("POST","/api/accounts/"+a.id+"/delete",undefined,"Удалён"); }},"Удалить")))))):h("div",{class:"hint"},"Аккаунтов пока нет.")));
 }
 
+// instructions of the site
+let PAGES=[];
+function pagesCard(){
+  const rows=PAGES.concat([{slug:"",title:"",body:"",sort:PAGES.length+1,published:true,isNew:true}]).map(pg=>{
+    const sl=h("input",{value:pg.slug,placeholder:"адрес, например ios",style:"width:140px",disabled:!pg.isNew}), ti=h("input",{value:pg.title,placeholder:"название",class:"grow"}),
+      so=h("input",{type:"number",value:pg.sort,style:"width:70px"}), pu=h("input",{type:"checkbox",checked:pg.published,style:"width:auto"}),
+      bo=h("textarea",{style:"width:100%;min-height:150px",placeholder:"## Заголовок\n1. Шаг первый\n- пункт\n**жирный**, `код`, [ссылка](https://example.com)"},pg.body);
+    return h("details",{style:"border-top:1px solid var(--line);padding:6px 0"},h("summary",{},(pg.isNew?"+ Новая страница":pg.title+" · /help/"+pg.slug)+(pg.published||pg.isNew?"":" · скрыта")),
+      h("div",{class:"row"},sl,ti,h("span",{class:"muted"},"порядок"),so,pu,h("span",{class:"muted"},"показывать")),bo,
+      h("div",{class:"row"},h("button",{class:"b",onclick:async()=>{ const slug=(pg.isNew?sl.value:pg.slug).trim(); try{ const r=await api("PUT","/api/site/pages/"+encodeURIComponent(slug),{title:ti.value,body:bo.value,sort:parseInt(so.value||"0",10),published:pu.checked}); PAGES=r.pages; toast("Страница сохранена"); render(); }catch(e){ toast(e.message,true); } }},"Сохранить"),
+        pg.isNew?null:h("button",{class:"b d",onclick:async()=>{ if(!confirm("Удалить страницу «"+pg.title+"»?")) return; try{ const r=await api("DELETE","/api/site/pages/"+pg.slug); PAGES=r.pages; render(); }catch(e){ toast(e.message,true); } }},"Удалить")));
+  });
+  return h("div",{class:"card"},h("h2",{},"Инструкции для пользователей"),
+    h("div",{class:"hint"},"Раздел /help на сайте виден всем без входа. Разметка: «## » заголовок, «- » список, «1. » нумерованный список, **жирный**, `код`, [текст](https://адрес). Любая другая разметка показывается как обычный текст."),rows);
+}
 function copyBtn(text){ return h("button",{class:"b s",onclick:async()=>{ try{ await navigator.clipboard.writeText(text); toast("Скопировано"); }catch(e){ prompt("Скопируйте:",text);} }},"Копировать"); }
 function linkRow(l){ return h("div",{class:"lnk"},h("span",{class:"t"},l.title),copyBtn(l.link),h("button",{class:"b s",onclick:()=>showQR(l.title,l.link)},"QR")); }
 async function showQR(title,text){
@@ -617,6 +649,38 @@ function vUsers(){
           h("button",{class:"b d",title:"удалить навсегда",onclick:async()=>{ if(!confirm("Удалить пользователя «"+u.name+"» навсегда?\nЕго ссылка перестанет работать, статистика будет стёрта. Отключить без удаления можно кнопкой «Отключить».")) return; try{ USERS=await api("DELETE","/api/users/"+encodeURIComponent(u.name)); toast("Пользователь удалён, из шлюза исчезнет в течение 30 секунд"); render(); }catch(e){ toast(e.message,true);} }},"Удалить"))))))));
 }
 
+// ---- network: servers that report to this panel
+let NET=null, NETNEW=null;
+function netAge(ts){ if(!ts) return ["не подключался","bad"]; const d=(Date.now()-Date.parse(ts))/1000; return d<180?["в сети","ok"]:[ "был "+(d<3600?Math.round(d/60)+" мин":d<86400?Math.round(d/3600)+" ч":Math.round(d/86400)+" дн")+" назад","bad"]; }
+function netToken(res){ // a token is shown once: the panel keeps only its hash
+  return h("div",{class:"card"},h("h2",{},"Токен сервера «"+(res.server?res.server.name:"")+"»"),
+    h("p",{class:"hint"},"Токен показывается один раз. Выполните команду на машине, где нужен сервер (после установки токен хранится в её конфигурации):"),
+    h("pre",{style:"white-space:pre-wrap;word-break:break-all;user-select:all"},res.command||res.token),
+    h("div",{class:"row"},copyBtn(res.command||res.token),h("button",{class:"b s",onclick:()=>{ NETNEW=null; render(); }},"Закрыть")));
+}
+function vNet(){
+  if(!NET) return h("div",{class:"hint"},"загрузка…");
+  const name=h("input",{placeholder:"имя, например Берлин"}), kind=h("select",{},h("option",{value:"balancer"},"балансировщик (--mode balancer-only)"),h("option",{value:"endnode"},"конечный сервер (--mode end-node)"));
+  const act=async(fn,msg)=>{ try{ await fn(); if(msg) toast(msg); NET=await api("GET","/api/servers"); render(); }catch(e){ toast(e.message,true); } };
+  const rows=(NET.servers||[]).map(s=>{ const [st,cl]=netAge(s.last_seen); return h("tr",{},
+    h("td",{},h("b",{},s.name),h("div",{class:"muted",style:"font-size:12px"},s.kind==="balancer"?"балансировщик":"конечный сервер")),
+    h("td",{},h("span",{class:"pill "+(s.enabled?cl:"bad")},s.enabled?st:"выключен"),h("div",{class:"muted",style:"font-size:12px"},s.last_seen?fmtDT(Date.parse(s.last_seen)/1000):"")),
+    h("td",{},(s.info&&s.info.host)||"—",h("div",{class:"muted",style:"font-size:12px"},(s.info&&s.info.version?"версия "+s.info.version:"")+(s.info&&s.info.links?" · ссылок: "+s.info.links.length:""))),
+    h("td",{},"↓ "+fmtBytes(s.down)+" ↑ "+fmtBytes(s.up)),
+    h("td",{},h("div",{class:"row"},
+      h("button",{class:"b s",onclick:()=>act(()=>api("POST","/api/servers/"+s.id+"/"+(s.enabled?"disable":"enable")),s.enabled?"Выключен":"Включён")},s.enabled?"Выключить":"Включить"),
+      h("button",{class:"b s",onclick:async()=>{ if(!confirm("Выпустить новый токен? Прежний перестанет работать, сервер надо будет перенастроить.")) return; try{ NETNEW=await api("POST","/api/servers/"+s.id+"/token"); NETNEW.server=s; render(); }catch(e){ toast(e.message,true); } }},"Новый токен"),
+      h("button",{class:"b d",onclick:()=>{ if(confirm("Удалить сервер «"+s.name+"» из сети? Его ссылки исчезнут из подписок.")) act(()=>api("DELETE","/api/servers/"+s.id),"Удалён"); }},"Удалить")))); });
+  return h("div",{},
+    NETNEW?netToken(NETNEW):null,
+    h("div",{class:"card"},h("h2",{},"Сеть серверов"),
+      h("p",{class:"hint"},"Балансировщики и конечные серверы, установленные отдельно, сами подключаются к панели по токену (раз в 30 секунд). Они получают список пользователей: заблокированный, отключённый или с истёкшим сроком исчезает из списка, и его соединения на этих серверах закрываются. Ссылки серверов попадают в подписки: балансировщики в «balancers», конечные серверы в «servers»; «all» включает всё."),
+      h("p",{class:"hint"},"Роль этой установки: "+(NET.role==="panel"?"только панель":NET.role==="balancer"?"балансировщик":"балансировщик и панель")+". Адрес панели для серверов: "+NET.panel)),
+    h("div",{class:"card"},h("h2",{},"Добавить сервер"),h("div",{class:"row"},name,kind,
+      h("button",{class:"b",onclick:async()=>{ try{ NETNEW=await api("POST","/api/servers",{name:name.value,kind:kind.value}); NET=await api("GET","/api/servers"); render(); }catch(e){ toast(e.message,true); } }},"Создать и получить команду"))),
+    h("div",{class:"card tw"},h("table",{},h("tr",{},h("th",{},"Сервер"),h("th",{},"Состояние"),h("th",{},"Адрес"),h("th",{},"Трафик пользователей"),h("th",{},"")),rows.length?rows:h("tr",{},h("td",{colspan:5,class:"hint"},"серверов пока нет")))));
+}
+
 // ---- backups
 let BK=null;
 async function bkRaw(method,path,body){ const r=await fetch(path,{method,headers:{"Authorization":"Bearer "+TOKEN},body}); if(!r.ok){ let j=null; try{ j=await r.json(); }catch(e){} throw new Error((j&&j.error)||("HTTP "+r.status)); } return r; }
@@ -644,6 +708,9 @@ function vBackup(){
 let FORUM=null, FTOPIC=null;
 const FKIND={bug:"Ошибка",question:"Вопрос",idea:"Идея",other:"Другое"};
 async function forumAct(method,path,body,msg){ try{ await api(method,path,body); if(method==="DELETE") FTOPIC=null; if(msg) toast(msg); await load(); }catch(e){ toast(e.message,true); } }
+async function forumBlobUrl(f){ const r=await bkRaw("GET","/api/forum/files/"+f.id); return URL.createObjectURL(await r.blob()); }
+async function forumDownload(f){ try{ const u=await forumBlobUrl(f); const a=h("a",{href:u,download:f.name}); document.body.append(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(u),8000); }catch(e){ toast(e.message,true); } }
+function forumThumb(f){ const im=h("img",{alt:f.name,style:"max-width:160px;max-height:110px;border-radius:8px;border:1px solid var(--line)"}); forumBlobUrl(f).then(u=>im.src=u).catch(()=>{}); return im; }
 function vForum(){
   if(!FORUM) return h("div",{class:"hint"},"загрузка…");
   const ts=FORUM.topics||[];
@@ -655,7 +722,7 @@ function vForum(){
         h("td",{},h("button",{class:"b s",onclick:async()=>{ FTOPIC=await api("GET","/api/forum/topics/"+t.id); render(); window.scrollTo(0,document.body.scrollHeight); }},"Открыть"))))),
     ts.length?null:h("div",{class:"muted"},"Тем пока нет."));
   if(!FTOPIC) return h("div",{},list);
-  const t=FTOPIC.topic, ta=h("textarea",{rows:4,style:"width:100%",placeholder:"ответ от имени поддержки",maxlength:4000});
+  const t=FTOPIC.topic, ta=h("textarea",{rows:4,style:"width:100%",placeholder:"ответ от имени поддержки",maxlength:4000}), fl=h("input",{type:"file",multiple:true});
   const op=(o,label,cls)=>h("button",{class:"b "+(cls||"s"),onclick:()=>forumAct("POST","/api/forum/topics/"+t.id+"/"+o,undefined,"Готово")},label);
   const det=h("div",{class:"card"},h("div",{class:"row"},h("h2",{style:"margin:0"},(t.pinned?"📌 ":"")+t.title),h("button",{class:"b s",onclick:()=>{ FTOPIC=null; render(); }},"Закрыть окно")),
     h("div",{class:"muted"},(FKIND[t.kind]||t.kind)+" · "+t.author+" · "+(t.status==="open"?"открыта":"закрыта")+(t.hidden?" · скрыта":"")),
@@ -663,8 +730,15 @@ function vForum(){
       h("button",{class:"b d",onclick:()=>{ if(confirm("Удалить тему вместе с сообщениями?")) forumAct("DELETE","/api/forum/topics/"+t.id,undefined,"Удалено"); }},"Удалить")),
     FTOPIC.posts.map(p=>h("div",{class:"card",style:p.staff?"border-color:var(--accent)":""},h("div",{class:"muted",style:"font-size:12px"},p.author+" · "+fmtDT(p.created)+(p.hidden?" · скрыто":"")),
       h("div",{style:"white-space:pre-wrap;word-break:break-word"},p.body),
+      (p.files||[]).map(f=>h("div",{class:"row"},f.kind==="image"?forumThumb(f):null,
+        h("button",{class:"b s",onclick:()=>forumDownload(f)},"📎 "+f.name+" · "+fmtBytes(f.size)),
+        h("button",{class:"b d",onclick:()=>{ if(confirm("Удалить вложение?")) forumAct("DELETE","/api/forum/files/"+f.id,undefined,"Удалено"); }},"×"))),
       h("div",{class:"row"},h("button",{class:"b s",onclick:()=>forumAct("POST","/api/forum/posts/"+p.id+"/"+(p.hidden?"show":"hide"),undefined,"Готово")},p.hidden?"Показать":"Скрыть")))),
-    ta,h("p",{},h("button",{class:"b",onclick:async()=>{ if(!ta.value.trim()) return; await forumAct("POST","/api/forum/topics/"+t.id+"/reply",{body:ta.value},"Ответ отправлен"); }},"Ответить")));
+    ta,h("div",{class:"row"},fl,h("span",{class:"muted"},"Для администратора нет ограничений по размеру и типу.")),
+    h("p",{},h("button",{class:"b",onclick:async()=>{
+      if(!ta.value.trim()&&!fl.files.length) return;
+      try{ const fd=new FormData(); fd.append("body",ta.value); for(const f of fl.files) fd.append("file",f);
+        await bkRaw("POST","/api/forum/topics/"+t.id+"/reply",fd); toast("Ответ отправлен"); await load(); }catch(e){ toast(e.message,true); } }},"Ответить")));
   return h("div",{},list,det);
 }
 

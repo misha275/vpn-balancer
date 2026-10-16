@@ -170,7 +170,7 @@ func (b *Bundle) validate() error {
 	if !reSlug.MatchString(b.Slug) {
 		return errors.New("адрес сборки: латиница, цифры и дефис, до 32 символов (например vip или games)")
 	}
-	if b.Slug == subBalancers || b.Slug == subAll {
+	if b.Slug == subBalancers || b.Slug == subAll || b.Slug == subServers {
 		return errors.New("этот адрес занят встроенной подпиской")
 	}
 	if len(b.Nodes) > 2000 || len(b.Sources) > 200 {

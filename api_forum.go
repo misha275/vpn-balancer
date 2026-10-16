@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 func (a *API) registerForum(mux *http.ServeMux) {
@@ -15,6 +16,8 @@ func (a *API) registerForum(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/forum/topics/{id}/{op}", a.auth(a.forumTopicOp))
 	mux.HandleFunc("DELETE /api/forum/topics/{id}", a.auth(a.forumTopicDelete))
 	mux.HandleFunc("POST /api/forum/posts/{id}/{op}", a.auth(a.forumPostOp))
+	mux.HandleFunc("GET /api/forum/files/{id}", a.auth(a.forumFileGet))
+	mux.HandleFunc("DELETE /api/forum/files/{id}", a.auth(a.forumFileDelete))
 }
 
 func (a *API) forumFail(w http.ResponseWriter, err error) {
@@ -48,20 +51,67 @@ func (a *API) forumTopicGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"topic": t, "posts": posts})
 }
 
+// forumStaffReply is the answer of the administrator: JSON {body}, or a multipart form with "body" and any number of "file" parts.
+// The administrator has no size limits and no permissions to ask for (only a technical ceiling).
 func (a *API) forumStaffReply(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		Body string `json:"body"`
-	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16384)).Decode(&in); err != nil {
-		apiErr(w, 400, fmt.Errorf("ожидается JSON {body}"))
-		return
-	}
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err := a.store.AddPost(r.Context(), id, nil, true, in.Body); err != nil {
+	var body string
+	var atts []Attachment
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+		r.Body = http.MaxBytesReader(w, r.Body, forumStaffMax)
+		if err := r.ParseMultipartForm(8 << 20); err != nil {
+			apiErr(w, 400, fmt.Errorf("не удалось принять форму: %v", err))
+			return
+		}
+		defer r.MultipartForm.RemoveAll()
+		body = r.FormValue("body")
+		for _, fh := range r.MultipartForm.File["file"] {
+			data, err := readPart(fh, forumStaffMax)
+			if err != nil {
+				apiErr(w, 400, err)
+				return
+			}
+			at, err := checkAttachment("", fh.Filename, data, true)
+			if err != nil {
+				apiErr(w, 400, err)
+				return
+			}
+			atts = append(atts, at)
+		}
+	} else {
+		var in struct {
+			Body string `json:"body"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16384)).Decode(&in); err != nil {
+			apiErr(w, 400, fmt.Errorf("ожидается JSON {body}"))
+			return
+		}
+		body = in.Body
+	}
+	if err := a.store.AddPostA(r.Context(), id, nil, true, body, atts); err != nil {
 		a.forumFail(w, err)
 		return
 	}
 	a.forumTopicGet(w, r)
+}
+
+func (a *API) forumFileGet(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	f, data, err := a.store.GetFile(r.Context(), id, true)
+	if err != nil {
+		a.forumFail(w, err)
+		return
+	}
+	writeStoredFile(w, f, data)
+}
+
+func (a *API) forumFileDelete(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err := a.store.DeleteFile(r.Context(), id); err != nil {
+		a.forumFail(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]string{"ok": "готово"})
 }
 
 func (a *API) forumTopicOp(w http.ResponseWriter, r *http.Request) {

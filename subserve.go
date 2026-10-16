@@ -52,8 +52,45 @@ func relabel(n *Node, cfg *Config) (string, bool) {
 	return link + "#" + url.PathEscape(name), true
 }
 
+// subUserinfo is the standard header that clients (Hiddify, v2rayN, Streisand, Happ, sing-box...) show in the
+// title of the subscription: used traffic and the end of the access. total=0 means "no limit".
+func subUserinfo(tr UserTraffic, u *User) string {
+	s := fmt.Sprintf("upload=%d; download=%d; total=0", tr.AllUp, tr.AllDown)
+	if u.Expires != nil {
+		s += fmt.Sprintf("; expire=%d", u.Expires.Unix())
+	}
+	return s
+}
+
+// titleWithStats adds the usage and the end date to the name of the subscription: every client shows the name, so the
+// numbers are visible even in apps that ignore the subscription-userinfo header.
+func titleWithStats(cfg *Config, title string, tr UserTraffic, u *User) string {
+	if !cfg.subTitleStats() {
+		return title
+	}
+	title += fmt.Sprintf(" · ↓%s ↑%s", fmtBytesRu(tr.AllDown), fmtBytesRu(tr.AllUp))
+	if u.Expires != nil {
+		title += " · до " + u.Expires.Format("02.01.2006")
+	} else {
+		title += " · без срока"
+	}
+	return title
+}
+
+func (c *Config) subTitleStats() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.SubTitleStats == nil || *c.SubTitleStats
+}
+
 // RenderBalancers is the subscription "balancers only": one link per mode.
-func RenderBalancers(cfg *Config, u *User) []string { return modeLinks(cfg, *u) }
+func RenderBalancers(cfg *Config, u *User) []string {
+	var out []string
+	if cfg.Role != "panel" { // the panel itself carries no traffic: only the balancers that report to it
+		out = modeLinks(cfg, *u)
+	}
+	return append(out, cfg.remoteLinks(*u, "balancer")...)
+}
 
 // RenderSub builds the plain list of links for a user (before base64).
 // The balancers (current, best speed, best ping) come first, then all allowed servers.
@@ -79,7 +116,7 @@ func RenderSub(cfg *Config, u *User, nodes []*Node) []string {
 			lines = append(lines, l)
 		}
 	}
-	return lines
+	return append(lines, cfg.remoteLinks(*u, "endnode")...)
 }
 
 func dedupe(in []string) []string {
@@ -159,6 +196,8 @@ func (s *SubServer) Handler() http.Handler {
 				switch {
 				case kind == subBalancers:
 					lines = append(lines, RenderBalancers(s.cfg, u)...)
+				case kind == subServers:
+					lines = append(lines, s.cfg.remoteLinks(*u, "endnode")...)
 				case kind == subAll:
 					nodes, err := s.store.ActiveNodes(ctx, s.cfg.NodeGrace)
 					if err != nil {
@@ -199,6 +238,9 @@ func (s *SubServer) Handler() http.Handler {
 				if key == subBalancers {
 					title += " · балансировщики"
 				}
+				if key == subServers {
+					title += " · серверы"
+				}
 				if !add(key) {
 					http.Error(w, "temporary error", http.StatusServiceUnavailable)
 					return
@@ -209,6 +251,9 @@ func (s *SubServer) Handler() http.Handler {
 				}
 			}
 			go s.store.NoteSubFetch(context.Background(), u.ID)
+			tr, _ := s.store.UserUsage(ctx, u.Name)
+			title = titleWithStats(s.cfg, title, tr, u)
+			w.Header().Set("subscription-userinfo", subUserinfo(tr, u))
 			body := strings.Join(dedupe(lines), "\n")
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
@@ -224,6 +269,7 @@ func (s *SubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /sub/{token}", serve("union")) // everything the account may take
 	mux.HandleFunc("GET /sub/{token}/all", serve(subAll))
 	mux.HandleFunc("GET /sub/{token}/balancers", serve(subBalancers))
+	mux.HandleFunc("GET /sub/{token}/servers", serve(subServers))
 	mux.HandleFunc("GET /sub/{token}/b/{slug}", serve("bundle"))
 	return mux
 }

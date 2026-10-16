@@ -313,6 +313,9 @@ func parseVMess(line string) *Node {
 		q.Set("sni", sni)
 		q.Set("alpn", sv(m["alpn"]))
 		q.Set("fp", sv(m["fp"]))
+		if b, _ := m["allowInsecure"].(bool); b || sv(m["allowInsecure"]) == "1" || strings.EqualFold(sv(m["allowInsecure"]), "true") {
+			q.Set("allowInsecure", "1")
+		}
 	}
 	sec := sv(m["scy"])
 	if sec == "" {

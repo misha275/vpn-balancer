@@ -22,6 +22,11 @@ type SiteCfg struct {
 	Support      string
 	Staging      bool
 	Via443       bool
+	Theme        string
+	Palette      string
+	Accent       string
+	ForumImages  bool
+	ForumFiles   bool
 }
 
 func (c *Config) getSite() SiteCfg {
@@ -29,6 +34,9 @@ func (c *Config) getSite() SiteCfg {
 	defer c.mu.RUnlock()
 	s := SiteCfg{Enabled: c.SiteEnabled, Domain: c.SiteDomain, Email: c.SiteEmail, Name: c.SiteName, Payment: c.SitePayment,
 		Support: c.SiteSupport, Staging: c.SiteACMEStaging, Via443: c.SiteVia443, Registration: true, TrialDays: 3}
+	s.Theme, s.Palette, s.Accent = c.SiteTheme, c.SitePalette, c.SiteAccent
+	s.ForumImages = c.ForumImages == nil || *c.ForumImages
+	s.ForumFiles = c.ForumFiles != nil && *c.ForumFiles
 	if c.SiteRegistration != nil {
 		s.Registration = *c.SiteRegistration
 	}
@@ -232,6 +240,31 @@ func init() {
 			}, func(c *Config, v string) { c.SitePayment = v }, func(c *Config) string { return c.SitePayment }),
 		boolSetting("site_acme_staging", "тестовые сертификаты Let's Encrypt (браузер им не доверяет, зато нет лимитов)", func(c *Config, v bool) { c.SiteACMEStaging = v },
 			func(c *Config) bool { return c.SiteACMEStaging }),
+		strSetting("site_theme", "тема сайта по умолчанию: auto (как на устройстве), light или dark", 10,
+			func(v string) error {
+				if !validTheme(v) {
+					return fmt.Errorf("только auto, light или dark")
+				}
+				return nil
+			}, func(c *Config, v string) { c.SiteTheme = v }, func(c *Config) string { return c.SiteTheme }),
+		strSetting("site_palette", "палитра сайта: blue, green, teal, violet, orange, rose, graphite или custom (цвет в site_accent)", 12,
+			func(v string) error {
+				if v != "custom" && !validPalette(v) {
+					return fmt.Errorf("только blue, green, teal, violet, orange, rose, graphite или custom")
+				}
+				return nil
+			}, func(c *Config, v string) { c.SitePalette = v }, func(c *Config) string { return c.SitePalette }),
+		strSetting("site_accent", "свой цвет сайта вида #1a73e8 (для палитры custom)", 7,
+			func(v string) error {
+				if v != "" && !reHexColor.MatchString(v) {
+					return fmt.Errorf("нужен цвет вида #1a73e8")
+				}
+				return nil
+			}, func(c *Config, v string) { c.SiteAccent = v }, func(c *Config) string { return c.SiteAccent }),
+		boolSetting("forum_images", "разрешить обычным пользователям прикладывать картинки (до 1 МБ) к сообщениям форума", func(c *Config, v bool) { c.ForumImages = &v },
+			func(c *Config) bool { return c.ForumImages == nil || *c.ForumImages }),
+		boolSetting("forum_files", "разрешить обычным пользователям прикладывать файлы (до 10 МБ) к сообщениям форума", func(c *Config, v bool) { c.ForumFiles = &v },
+			func(c *Config) bool { return c.ForumFiles != nil && *c.ForumFiles }),
 		boolSetting("site_via_reality", "открывать сайт и на порту 443 (шлюз передаёт браузеры сайту)", func(c *Config, v bool) { c.SiteVia443 = v },
 			func(c *Config) bool { return c.SiteVia443 }),
 	)

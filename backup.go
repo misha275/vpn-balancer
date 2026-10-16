@@ -24,7 +24,7 @@ import (
 )
 
 // appVersion is written into backup names and files (kept equal to the VERSION file; a test checks it).
-const appVersion = "3.6.0"
+const appVersion = "3.7.0"
 
 const (
 	backupFormat   = "vpnb-backup"
@@ -37,10 +37,14 @@ const (
 // acme_cache (certificates are re-issued) and the admin token (belongs to the installation, not to the data).
 var backupTables = []string{
 	"plans", "ext_sources", "users", "accounts", "payments", "custom_nodes", "bundles", "bundle_nodes",
-	"bundle_sources", "wg_server", "wg_peers", "traffic_hourly", "user_seen", "forum_topics", "forum_posts", "settings",
+	"bundle_sources", "wg_server", "wg_peers", "traffic_hourly", "user_seen", "forum_topics", "forum_posts", "forum_files",
+	"site_pages", "servers", "server_traffic", "settings",
 }
 
-var backupSerial = []string{"plans", "ext_sources", "users", "accounts", "payments", "custom_nodes", "bundles", "forum_topics", "forum_posts"}
+// backupBigTable is not put into a backup when it is larger than the limit (attachments of the forum may be gigabytes).
+const backupFilesLimit = 256 << 20
+
+var backupSerial = []string{"plans", "ext_sources", "users", "accounts", "payments", "custom_nodes", "bundles", "forum_topics", "forum_posts", "forum_files", "servers"}
 
 type backupFile struct {
 	Format  string                     `json:"format"`
@@ -70,6 +74,14 @@ func (s *Store) ExportBackup(ctx context.Context) ([]byte, error) {
 	defer tx.Rollback(ctx)
 	bf := backupFile{Format: backupFormat, Version: appVersion, Created: time.Now().UTC(), Tables: map[string]json.RawMessage{}}
 	for _, t := range backupTables {
+		if t == "forum_files" {
+			var n int64
+			if err := tx.QueryRow(ctx, `SELECT COALESCE(SUM(size),0) FROM forum_files`).Scan(&n); err == nil && n > backupFilesLimit {
+				log.Printf("backup: attachments of the forum (%d MB) are larger than %d MB and are not included", n>>20, backupFilesLimit>>20)
+				bf.Tables[t] = json.RawMessage("[]")
+				continue
+			}
+		}
 		q := `SELECT COALESCE(jsonb_agg(to_jsonb(t)),'[]'::jsonb) FROM ` + t + ` t`
 		if t == "settings" {
 			q += ` WHERE t.key <> 'admin_token'`

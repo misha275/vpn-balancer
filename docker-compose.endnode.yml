@@ -1,0 +1,16 @@
+# Режим установщика «end-node»: конечный сервер с готовыми протоколами, без балансировки.
+# Сеть хоста: протоколы и порты меняются командой vpnb-node (add / del) без правки этого файла.
+services:
+  node:
+    build: .
+    image: vpnb-node
+    restart: always
+    network_mode: host
+    entrypoint: ["balancer", "-c", "/etc/endnode/endnode.yaml"]
+    command: ["endnode", "run"]
+    volumes:
+      - ./endnode:/etc/endnode
+      - node-data:/var/lib/endnode
+
+volumes:
+  node-data:

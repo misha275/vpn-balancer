@@ -34,6 +34,8 @@ func subTitle(key string, bundles map[string]string) string {
 		return "Основная: 3 балансировщика"
 	case subAll:
 		return "Основная: балансировщики и все серверы пула"
+	case subServers:
+		return "Конечные серверы (из раздела «Сеть»)"
 	}
 	if n, ok := bundles[key]; ok {
 		return "Категория: " + n
@@ -70,7 +72,7 @@ func (a *API) catalog(r *http.Request) (*catalogView, error) {
 		return nil, err
 	}
 	v := &catalogView{Nodes: ns, Sources: srcs, Bundles: bs, Default: a.cfg.defaultSubs(), Days: a.cfg.defaultDays(),
-		Subs: []catalogSub{{subBalancers, subTitle(subBalancers, nil), true}, {subAll, subTitle(subAll, nil), true}}}
+		Subs: []catalogSub{{subBalancers, subTitle(subBalancers, nil), true}, {subAll, subTitle(subAll, nil), true}, {subServers, subTitle(subServers, nil), true}}}
 	for _, b := range bs {
 		t := "Категория: " + b.Name
 		if !b.Enabled {

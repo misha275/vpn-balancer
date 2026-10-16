@@ -49,7 +49,7 @@ func (a *API) siteGet(w http.ResponseWriter, r *http.Request) {
 	eff := a.cfg.Effective()
 	set := map[string]any{}
 	for k, v := range eff {
-		if strings.HasPrefix(k, "site_") {
+		if strings.HasPrefix(k, "site_") || strings.HasPrefix(k, "forum_") {
 			set[k] = v
 		}
 	}

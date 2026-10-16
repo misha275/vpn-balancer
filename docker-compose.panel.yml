@@ -1,0 +1,43 @@
+# Режим установщика «panel»: только панель управления (пользователи, группы, сайт, форум, серверы сети).
+# Трафик пользователей эта установка не несёт: балансировщики (balancer-only) и конечные серверы (end-node)
+# подключаются к ней сами по токенам (вкладка «Сеть» в панели).
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: balancer
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: balancer
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U balancer"]
+      interval: 5s
+      retries: 10
+
+  balancer:
+    build: .
+    image: vpnb-controller
+    restart: always
+    environment:
+      DB_PASSWORD: ${DB_PASSWORD}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "80:80"           # сертификат Let's Encrypt (HTTP-01) и переход на https
+      - "443:443"         # сайт и подписки по HTTPS; серверы сети приходят сюда же (/api/sync)
+    volumes:
+      - ./config.yaml:/etc/balancer/config.yaml:ro
+      - balancer-data:/var/lib/balancer
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  pgdata:
+  balancer-data:

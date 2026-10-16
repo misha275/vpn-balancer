@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"html/template"
 	"log"
 	"net/http"
 	"net/url"
@@ -212,6 +213,13 @@ type pageData struct {
 	Plans                []planView
 	Payment              string
 	Forum                forumData
+	Help                 helpData
+
+	// look
+	Theme, Palette, CSSVer, Path string
+	AccentStyle                  template.CSS
+	ThemeOpts                    []themeOpt
+	PaletteOpts                  []paletteOpt
 
 	// cabinet
 	State, Until, DaysWord, Created             string
@@ -234,9 +242,26 @@ type planView struct {
 type linkItem struct{ Kind, Title, URL string }
 type payItem struct{ Date, Plan, Amount, Status, Class string }
 
+type themeOpt struct {
+	ID, Title, Icon string
+	On              bool
+}
+type paletteOpt struct {
+	ID, Title, Color string
+	On               bool
+}
+
 func (s *Site) base(r *http.Request, acc *Account, hash, title string) pageData {
 	sc := s.cfg.getSite()
 	d := pageData{Title: title, Site: sc.Name, Support: sc.Support, CanRegister: sc.Registration, Trial: trialText(sc.TrialDays), Payment: sc.Payment}
+	pf := s.prefsOf(r)
+	d.Theme, d.Palette, d.AccentStyle, d.CSSVer, d.Path = pf.Theme, pf.Palette, template.CSS(pf.AccentStyle), siteCSSVer, r.URL.Path
+	for _, t := range siteThemes {
+		d.ThemeOpts = append(d.ThemeOpts, themeOpt{t.ID, t.Title, t.Icon, t.ID == pf.Theme})
+	}
+	for _, p := range sitePalettes {
+		d.PaletteOpts = append(d.PaletteOpts, paletteOpt{p.ID, p.Title, p.Light, p.ID == pf.Palette})
+	}
 	if acc != nil {
 		d.Email, d.CSRF = acc.Email, s.csrf(hash)
 	}
@@ -252,7 +277,7 @@ func (s *Site) render(w http.ResponseWriter, code int, name string, d pageData) 
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("X-Frame-Options", "DENY")
 	h.Set("Referrer-Policy", "same-origin")
-	h.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-"+nonce+"'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+	h.Set("Content-Security-Policy", "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'nonce-"+nonce+"'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
 	w.WriteHeader(code)
 	if err := siteTpl.ExecuteTemplate(w, name, d); err != nil {
 		log.Printf("site: template %s: %v", name, err)
@@ -281,6 +306,8 @@ func (s *Site) planViews(ctx context.Context) []planView {
 			switch {
 			case k == subBalancers:
 				has = append(has, "балансировщики")
+			case k == subServers:
+				has = append(has, "конечные серверы")
 			case k == subAll:
 				has = append(has, "балансировщики и все серверы")
 			default:
@@ -310,18 +337,38 @@ func (s *Site) Handler() http.Handler {
 	mux.HandleFunc("POST /pay", s.payPost)
 	mux.HandleFunc("GET /pay/{id}", s.payStatus)
 	mux.HandleFunc("GET /qr/{kind}", s.qr)
+	mux.HandleFunc("GET /site.css", s.cssPage)
+	mux.HandleFunc("POST /api/sync", s.syncHandler)
+	mux.HandleFunc("GET /prefs", s.prefsPage)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 	mux.HandleFunc("GET /robots.txt", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.Write([]byte("User-agent: *\nDisallow: /\n"))
 	})
 	s.registerForum(mux)
+	s.registerHelp(mux)
 	mux.Handle("GET /sub/", s.subs.Handler())
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		acc, h := s.current(r)
 		s.render(w, 404, "notfound", s.base(r, acc, h, "Не найдено"))
 	})
-	return http.MaxBytesHandler(mux, 16<<10)
+	small := http.MaxBytesHandler(mux, 16<<10)
+	big := http.MaxBytesHandler(mux, forumMaxRequest)
+	// only the forms that carry attachments may be large
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && (strings.HasPrefix(r.URL.Path, "/forum/") || r.URL.Path == "/api/sync") {
+			big.ServeHTTP(w, r)
+			return
+		}
+		small.ServeHTTP(w, r)
+	})
+}
+
+func (s *Site) cssPage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Write([]byte(siteCSS))
 }
 
 func (s *Site) home(w http.ResponseWriter, r *http.Request) {
@@ -493,7 +540,16 @@ func (s *Site) authedPost(w http.ResponseWriter, r *http.Request) (*Account, str
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return nil, ""
 	}
-	if !sameOrigin(r) || r.ParseForm() != nil || !hmac.Equal([]byte(r.PostForm.Get("csrf")), []byte(s.csrf(h))) {
+	var perr error
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+		perr = r.ParseMultipartForm(1 << 20) // bigger parts go to temporary files
+	} else {
+		perr = r.ParseForm()
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	if !sameOrigin(r) || perr != nil || !hmac.Equal([]byte(r.PostForm.Get("csrf")), []byte(s.csrf(h))) {
 		http.Error(w, "Запрос отклонён. Обновите страницу и повторите", http.StatusForbidden)
 		return nil, ""
 	}

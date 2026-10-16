@@ -465,6 +465,22 @@ func (s *Store) UserTrafficOf(ctx context.Context, name string) (UserTraffic, er
 	return t, err
 }
 
+// UserUsage is the traffic of a user over all servers: this one and those that report to it (see servers.go).
+func (s *Store) UserUsage(ctx context.Context, name string) (UserTraffic, error) {
+	t, err := s.UserTrafficOf(ctx, name)
+	if err != nil {
+		return t, err
+	}
+	var up, down int64
+	if err := s.pool.QueryRow(ctx, `SELECT COALESCE(SUM(up),0), COALESCE(SUM(down),0) FROM server_traffic WHERE user_name=$1`, name).Scan(&up, &down); err == nil {
+		t.AllUp += up
+		t.AllDown += down
+		t.D30Up += up
+		t.D30Down += down
+	}
+	return t, nil
+}
+
 // ---- certificate cache (golang.org/x/crypto/acme/autocert.Cache) ----
 
 func (s *Store) AcmeGet(ctx context.Context, key string) ([]byte, error) {

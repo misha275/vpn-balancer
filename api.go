@@ -106,6 +106,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	a.registerSite(mux)
 	a.registerSubs(mux)
 	a.registerForum(mux)
+	a.registerPages(mux)
 	a.registerBackup(mux)
 	mux.HandleFunc("POST /api/users", a.auth(a.addUser))
 	mux.HandleFunc("POST /api/users/{name}/block", a.auth(a.userBlock))
@@ -118,6 +119,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/wg/peers/{name}", a.auth(a.wgDelete))
 	mux.HandleFunc("GET /api/wg/peers/{name}/config", a.auth(a.wgConfig))
 	mux.HandleFunc("POST /api/pin", a.auth(a.pin))
+	a.registerServers(mux)
 	mux.HandleFunc("POST /api/refresh", a.auth(a.doRefresh))
 	mux.HandleFunc("POST /api/recheck", a.auth(a.recheck))
 }
@@ -126,7 +128,7 @@ func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	sw, _ := a.store.RecentSwitches(ctx, 20)
-	doc := map[string]any{"snapshot": a.chk.Snapshot(), "switches": sw, "ready": a.core.Ready()}
+	doc := map[string]any{"snapshot": a.chk.Snapshot(), "switches": sw, "ready": a.core.Ready(), "role": a.cfg.Role}
 	if gs, err := a.core.GatewayState(); err == nil {
 		doc["gateway"] = gs
 	} else {

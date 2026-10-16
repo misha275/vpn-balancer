@@ -10,7 +10,8 @@ import (
 // Subscription keys. The two built-in subscriptions come from the balancer; every bundle of own nodes is "b:<slug>".
 const (
 	subBalancers = "balancers" // the three balancer links (current, best speed, best ping)
-	subAll       = "all"       // balancers + every allowed server of the pool
+	subAll       = "all"       // balancers + every allowed server of the pool (+ the servers registered in the panel)
+	subServers   = "servers"   // end nodes registered in the panel (installer --mode end-node)
 	bundlePrefix = "b:"
 )
 
@@ -18,7 +19,7 @@ var reSlug = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`)
 
 // validSubKey checks the shape of a key (the bundle itself may have been deleted since).
 func validSubKey(k string) bool {
-	return k == subBalancers || k == subAll || (strings.HasPrefix(k, bundlePrefix) && reSlug.MatchString(k[len(bundlePrefix):]))
+	return k == subBalancers || k == subAll || k == subServers || (strings.HasPrefix(k, bundlePrefix) && reSlug.MatchString(k[len(bundlePrefix):]))
 }
 
 // cleanSubKeys validates and de-duplicates a list of keys, keeping the order.
@@ -28,7 +29,7 @@ func cleanSubKeys(in []string) ([]string, error) {
 	for _, k := range in {
 		k = strings.TrimSpace(k)
 		if !validSubKey(k) {
-			return nil, fmt.Errorf("неверный ключ подписки %q (нужно balancers, all или b:имя-категории)", k)
+			return nil, fmt.Errorf("неверный ключ подписки %q (нужно balancers, servers, all или b:имя-категории)", k)
 		}
 		if !seen[k] {
 			seen[k] = true
