@@ -105,3 +105,23 @@ func TestPanelScriptParses(t *testing.T) {
 		t.Fatalf("ui.html script: %v\n%s", err, out)
 	}
 }
+
+// Alerts and backups go through bot_api_url too (a proxy with a key in the path).
+func TestNotifierUsesProxy(t *testing.T) {
+	got := make(chan string, 2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- r.URL.Path
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+	n := &Notifier{token: "123:ABC", chat: "1", api: func() string { return srv.URL + "/KEY" }}
+	n.Notify("k", "hello", time.Second)
+	select {
+	case p := <-got:
+		if p != "/KEY/bot123:ABC/sendMessage" {
+			t.Fatalf("path %q", p)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no request reached the proxy")
+	}
+}

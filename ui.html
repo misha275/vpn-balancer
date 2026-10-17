@@ -855,7 +855,7 @@ function uBot(){
   const V=SET.values;
   const hook=h("input",{value:V.pay_webhook_secret||"",placeholder:"секрет (пусто — выключен)"});
   const tok=h("input",{value:V.bot_token||"",placeholder:"123456:ABC… от @BotFather (пусто — бота нет)"});
-  const botApi=h("input",{value:V.bot_api_url||"",placeholder:"https://api.telegram.org (по умолчанию)"});
+  const botApi=h("input",{value:V.bot_api_url||"",placeholder:"https://proxy.example.org/КЛЮЧ (пусто = https://api.telegram.org)"});
   const pay=h("select",{style:"width:auto"},[["manual","заявка, подтверждает админ"],["stub_auto","тест: оплачено сразу"],["off","оплата выключена"]].map(([v,t])=>h("option",{value:v,selected:v===V.site_payment},t)));
   const withBal=(ACCS||[]).filter(a=>a.balance_cents).length, tg=(ACCS||[]).filter(a=>a.telegram).length;
   return h("div",{},
@@ -867,7 +867,7 @@ function uBot(){
     h("div",{class:"card"},h("h2",{},"Telegram-бот"),
       h("div",{class:"hint"},"Человек привязывает аккаунт кодом из кабинета и дальше смотрит срок и ссылку подписки, покупает и продлевает, вводит промокод, берёт реферальную ссылку. Команды бота: /status, /sub, /plans, /buy, /promo, /ref."),
       setField("bot_token","Токен бота",tok,"Создайте бота у @BotFather и вставьте токен. Бот подхватит его в течение 15 секунд."),
-      setField("bot_api_url","Адрес API Telegram",botApi,"Нужен только если Telegram доступен через прокси."),
+      setField("bot_api_url","Адрес API Telegram",botApi,"Нужен, если сервер не достаёт до Telegram: адрес прокси вместе с ключом, например https://proxy.ytc-srv.org/КЛЮЧ (без слэша на конце). Через него работают и бот, и оповещения с копиями."),
       h("p",{},h("button",{class:"b",onclick:savePart(()=>({bot_token:tok.value.trim(),bot_api_url:botApi.value.trim()}),"Сохранено. Бот подхватит токен в течение 15 секунд")},"Сохранить"))));
 }
 

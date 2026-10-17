@@ -385,6 +385,7 @@ func (c *Config) ValidateRun() error {
 
 type Notifier struct {
 	token, chat string
+	api         func() string // Telegram API address (bot_api_url); nil = official
 	mu          sync.Mutex
 	last        map[string]time.Time
 }
@@ -406,7 +407,7 @@ func (n *Notifier) Notify(key, msg string, every time.Duration) {
 	}
 	go func() {
 		cl := &http.Client{Timeout: 10 * time.Second}
-		resp, err := cl.PostForm("https://api.telegram.org/bot"+n.token+"/sendMessage",
+		resp, err := cl.PostForm(n.apiBase()+"/bot"+n.token+"/sendMessage",
 			url.Values{"chat_id": {n.chat}, "text": {msg}})
 		if err != nil {
 			log.Printf("telegram: %v", scrubErr(err)) // the URL contains the bot token
@@ -414,6 +415,14 @@ func (n *Notifier) Notify(key, msg string, every time.Duration) {
 		}
 		resp.Body.Close()
 	}()
+}
+
+// apiBase is the address of the Telegram API: bot_api_url (a proxy) or the official one.
+func (n *Notifier) apiBase() string {
+	if n.api != nil {
+		return n.api()
+	}
+	return "https://api.telegram.org"
 }
 
 // SendFile uploads a file to the Telegram chat (only used for encrypted backups).
@@ -433,7 +442,7 @@ func (n *Notifier) SendFile(path, name string) {
 		fw.Write(data)
 		mw.Close()
 		cl := &http.Client{Timeout: 2 * time.Minute}
-		resp, err := cl.Post("https://api.telegram.org/bot"+n.token+"/sendDocument", mw.FormDataContentType(), &buf)
+		resp, err := cl.Post(n.apiBase()+"/bot"+n.token+"/sendDocument", mw.FormDataContentType(), &buf)
 		if err != nil {
 			log.Printf("telegram: %v", scrubErr(err))
 			return
@@ -577,7 +586,7 @@ func main() {
 func run(ctx context.Context, cfg *Config, st *Store) {
 	ctrlLogs := NewLogRing(3000) // the console of the panel
 	log.SetOutput(io.MultiWriter(os.Stderr, ctrlLogs))
-	notify := &Notifier{token: cfg.TelegramToken, chat: cfg.TelegramChat}
+	notify := &Notifier{token: cfg.TelegramToken, chat: cfg.TelegramChat, api: cfg.botAPI}
 	core := NewCore(cfg)
 	defer core.Stop()
 	col := NewCollector(st, core, ctrlLogs)

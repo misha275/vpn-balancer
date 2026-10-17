@@ -67,7 +67,7 @@ func init() {
 				}
 				return nil
 			}, func(c *Config, v string) { c.BotToken = v }, func(c *Config) string { return c.BotToken }),
-		strSetting("bot_api_url", "адрес API Telegram (по умолчанию https://api.telegram.org; нужен для прокси)", 200,
+		strSetting("bot_api_url", "адрес API Telegram (по умолчанию https://api.telegram.org). Для прокси Cloudflare Worker: https://proxy.ytc-srv.org/КЛЮЧ; через него идут бот, оповещения и копии", 200,
 			func(v string) error {
 				if v != "" && !strings.HasPrefix(v, "http://") && !strings.HasPrefix(v, "https://") {
 					return fmt.Errorf("нужен адрес вида https://…")
