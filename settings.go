@@ -96,6 +96,28 @@ func httpURLs(vals []string, name string, min, max int) error {
 	return nil
 }
 
+// poolEntries checks a list of sources of a pool of nodes: an address of a subscription (http, https) or a link of one
+// server (vless://, vmess://, trojan://, ss://, hysteria2://...), the way it is written in the apps.
+func poolEntries(vals []string, name string, min, max int) error {
+	if len(vals) < min || len(vals) > max {
+		return fmt.Errorf("%s: expected %d to %d entries, got %d", name, min, max, len(vals))
+	}
+	for _, v := range vals {
+		v = strings.TrimSpace(v)
+		if isServerLink(v) {
+			continue
+		}
+		u, err := url.Parse(v)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("%s: %q is neither an http(s) address of a subscription nor a link of a server", name, redactShort(v))
+		}
+	}
+	return nil
+}
+
+// isServerLink tells a link of one server (not a subscription address).
+func isServerLink(v string) bool { return !strings.HasPrefix(v, "http") && parseLink(v) != nil }
+
 // redactShort keeps tokens of subscription URLs out of error messages.
 func redactShort(v string) string {
 	if u, err := url.Parse(v); err == nil && u.Host != "" {
@@ -110,7 +132,7 @@ func redactShort(v string) string {
 var settingDefs = []settingDef{
 	{
 		key:  "subscriptions",
-		help: "список адресов подписок провайдеров",
+		help: "источники узлов канала админов: адреса подписок провайдеров или ссылки отдельных серверов (vless://, trojan://, …)",
 		parse: func(raw json.RawMessage) (func(*Config), error) {
 			var v []string
 			if err := json.Unmarshal(raw, &v); err != nil {
@@ -119,7 +141,7 @@ var settingDefs = []settingDef{
 			for i := range v {
 				v[i] = strings.TrimSpace(v[i])
 			}
-			if err := httpURLs(v, "subscriptions", 0, 100); err != nil {
+			if err := poolEntries(v, "subscriptions", 0, 100); err != nil {
 				return nil, err
 			}
 			return func(c *Config) { c.Subscriptions = v }, nil
@@ -128,7 +150,7 @@ var settingDefs = []settingDef{
 	},
 	{
 		key:  "users_subscriptions",
-		help: "подписки для канала пользователей (свой пул узлов); пусто — канал работает на пуле админов",
+		help: "источники узлов канала пользователей (свой пул): адреса подписок или ссылки отдельных серверов (vless://, trojan://, …); пусто — канал работает на пуле админов",
 		parse: func(raw json.RawMessage) (func(*Config), error) {
 			var v []string
 			if err := json.Unmarshal(raw, &v); err != nil {
@@ -137,7 +159,7 @@ var settingDefs = []settingDef{
 			for i := range v {
 				v[i] = strings.TrimSpace(v[i])
 			}
-			if err := httpURLs(v, "users_subscriptions", 0, 100); err != nil {
+			if err := poolEntries(v, "users_subscriptions", 0, 100); err != nil {
 				return nil, err
 			}
 			return func(c *Config) { c.UsersSubscriptions = v }, nil

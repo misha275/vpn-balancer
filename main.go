@@ -560,54 +560,6 @@ func main() {
 			log.Fatalf("config: %v", err)
 		}
 		run(ctx, cfg, st)
-	case "adduser":
-		if len(args) < 2 {
-			log.Fatal("usage: adduser NAME")
-		}
-		if _, err := st.AddUser(ctx, args[1]); err != nil {
-			log.Fatalf("adduser: %v", err)
-		}
-		us, err := st.ListUsers(ctx)
-		if err != nil {
-			log.Fatalf("adduser: %v", err)
-		}
-		for _, u := range us {
-			if u.Name == args[1] {
-				fmt.Println(userLink(cfg, cfg.getGatewayName(), u.UUID)) // first line stays the plain vless:// link
-				if s := subURL(cfg, u.SubToken); s != "" {
-					fmt.Println(s)
-					fmt.Println(subURLKind(cfg, u.SubToken, "balancers"))
-				}
-			}
-		}
-	case "deluser":
-		if len(args) < 2 {
-			log.Fatal("usage: deluser NAME")
-		}
-		if err := st.SetUserEnabled(ctx, args[1], false); err != nil {
-			log.Fatalf("deluser: %v", err)
-		}
-		fmt.Println("disabled")
-	case "rmuser":
-		if len(args) < 2 {
-			log.Fatal("usage: rmuser NAME")
-		}
-		ok, err := st.DeleteUser(ctx, args[1])
-		if err != nil {
-			log.Fatalf("rmuser: %v", err)
-		}
-		if !ok {
-			log.Fatalf("rmuser: user %q not found", args[1])
-		}
-		fmt.Println("deleted")
-	case "users":
-		us, err := st.ListUsers(ctx)
-		if err != nil {
-			log.Fatalf("users: %v", err)
-		}
-		for _, u := range us {
-			printUser(cfg, u)
-		}
 	default:
 		ok, err := runCLI(ctx, cfg, st, cmd, args[1:])
 		if !ok {

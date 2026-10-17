@@ -299,7 +299,7 @@ func (c *Checker) probe(ctx context.Context, tag, target string, timeout time.Du
 func (c *Checker) speed(ctx context.Context, tag string) (int, error) {
 	cl, tr := c.client(tag, 25*time.Second)
 	defer tr.CloseIdleConnections()
-	req, err := http.NewRequestWithContext(ctx, "GET", c.cfg.SpeedURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", c.cfg.speedURL(), nil)
 	if err != nil {
 		return 0, err
 	}
@@ -536,7 +536,7 @@ func (c *Checker) tier3(ctx context.Context) {
 		}
 		kbps, err := c.speed(ctx, n.Tag())
 		at := time.Now()
-		row := CheckRow{TS: at, NodeID: n.ID, Tier: 3, OK: err == nil, SpeedKbps: int32(kbps), Target: c.cfg.SpeedURL}
+		row := CheckRow{TS: at, NodeID: n.ID, Tier: 3, OK: err == nil, SpeedKbps: int32(kbps), Target: c.cfg.speedURL()}
 		if err != nil {
 			row.Err = err.Error()
 		}

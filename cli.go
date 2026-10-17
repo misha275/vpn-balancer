@@ -50,6 +50,28 @@ WireGuard (роутер MikroTik и другие устройства подкл
   rmuser ИМЯ                  удалить навсегда (ссылка перестаёт работать, статистика стирается)
   enableuser ИМЯ              включить обратно
   sub ИМЯ                     показать адрес личной подписки
+  expiry ИМЯ ДНИ|ГГГГ-ММ-ДД|нет
+                              срок доступа: прибавить дни (можно минус), указать дату или «нет» (без срока)
+
+Сервис (люди, деньги, серверы)
+  accounts                    аккаунты сайта: статус, срок, баланс
+  balance ПОЧТА ±СУММА [пояснение]
+                              изменить баланс аккаунта (сумма в валюте сервиса, например 100 или -50)
+  plans                       тарифы
+  promo list                  промокоды
+  promo add КОД percent|days|balance ЗНАЧЕНИЕ [лимит]
+                              создать промокод: скидка в процентах, дни доступа или деньги на баланс
+  promo on|off КОД            включить или выключить промокод
+  promo del КОД               удалить промокод
+  servers list                серверы сети (балансировщики и конечные серверы, установленные отдельно)
+  servers add ИМЯ balancer|endnode
+                              добавить сервер, печатает команду установки с токеном (токен виден один раз)
+  servers on|off|token|del НОМЕР
+                              включить, выключить, выпустить новый токен, удалить
+  pool admin|users list       источники узлов канала админов или канала пользователей
+  pool admin|users add АДРЕС-ИЛИ-ССЫЛКА
+                              добавить подписку (https://…) или один сервер (vless://, trojan://, …)
+  pool admin|users del НОМЕР  убрать источник
 
 Настройки (применяются на лету, хранятся в базе)
   get [КЛЮЧ]                  показать текущие настройки (все или одну)
@@ -77,8 +99,9 @@ WireGuard (роутер MikroTik и другие устройства подкл
 Прочее
   token                       токен для веб-панели
   check                       проверить config.yaml
-  run                         запустить контроллер (по умолчанию)
-  help                        эта справка
+  version                     версия
+  run                         запустить контроллер (по умолчанию; в терминале панели недоступно)
+  help [ТЕМА]                 эта справка; ТЕМА — команда (help promo) или ключ настройки (help switch_margin); help settings — все ключи
 
 Ключи настроек: %s
 `
@@ -205,6 +228,9 @@ func printNodes(nodes []NodeView) {
 func runCLI(ctx context.Context, cfg *Config, st *Store, cmd string, args []string) (bool, error) {
 	switch cmd {
 	case "help", "-h", "--help":
+		if len(args) > 0 {
+			return true, cliHelpTopic(args[0])
+		}
 		fmt.Printf(cliHelp, strings.Join(settingKeys(), ", "))
 	case "stats":
 		return true, cliStats(ctx, cfg, st)
@@ -496,7 +522,7 @@ func runCLI(ctx context.Context, cfg *Config, st *Store, cmd string, args []stri
 	case "backup", "backups", "restore":
 		return true, cliBackup(ctx, cfg, st, cmd, args)
 	default:
-		return false, nil
+		return runCLIService(ctx, cfg, st, cmd, args)
 	}
 	return true, nil
 }

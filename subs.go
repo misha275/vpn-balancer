@@ -84,7 +84,13 @@ func (s *Subs) Refresh(ctx context.Context) {
 	}
 	for _, sc := range list {
 		u := sc.url
-		body, err := fetchSub(ctx, u, s.cfg.SubUserAgent)
+		var body string
+		var err error
+		if isServerLink(u) {
+			body = u // one server written as a link: nothing to download
+		} else {
+			body, err = fetchSub(ctx, u, s.cfg.subUA())
+		}
 		var nodes []*Node
 		if err == nil {
 			if s.cfg.getNodeIdentity() == "link" {

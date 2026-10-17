@@ -102,6 +102,8 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/settings", a.auth(a.getSettings))
 	mux.HandleFunc("PUT /api/settings", a.auth(a.putSettings))
 	mux.HandleFunc("DELETE /api/settings/{key}", a.auth(a.resetSetting))
+	mux.HandleFunc("POST /api/terminal", a.auth(a.terminal))
+	mux.HandleFunc("GET /api/terminal/help", a.auth(a.terminalHelp))
 	mux.HandleFunc("GET /api/users", a.auth(a.users))
 	mux.HandleFunc("GET /api/qr", a.auth(a.qr))
 	a.registerSite(mux)
@@ -244,6 +246,9 @@ type userView struct {
 	BlockKind    string     `json:"block_kind,omitempty"` // "" = not blocked: unpaid | ban | other
 	BlockReason  string     `json:"block_reason,omitempty"`
 	BlockedAt    int64      `json:"blocked_at,omitempty"`
+	Traffic30    int64      `json:"traffic_30"`          // bytes of the last 30 days, all servers
+	TrafficAll   int64      `json:"traffic_all"`         // bytes in total
+	LastSeen     int64      `json:"last_seen,omitempty"` // when he was last seen on a server, unix seconds
 }
 
 // linkView is a link with its title (the panel shows a QR code for each).
@@ -315,8 +320,16 @@ func (a *API) users(w http.ResponseWriter, r *http.Request) {
 	}
 	out := []userView{}
 	names := a.bundleNames(r)
+	sums, _ := a.store.TrafficSummary(r.Context())
 	for _, u := range us {
-		out = append(out, newUserViewB(a.cfg, u, names))
+		v := newUserViewB(a.cfg, u, names)
+		if t := sums[u.Name]; t != nil {
+			v.Traffic30, v.TrafficAll = t.D30Up+t.D30Down, t.AllUp+t.AllDown
+			if !t.LastSeen.IsZero() {
+				v.LastSeen = t.LastSeen.Unix()
+			}
+		}
+		out = append(out, v)
 	}
 	writeJSON(w, 200, out)
 }

@@ -217,7 +217,7 @@ func (s *Store) RefreshExtSource(ctx context.Context, cfg *Config, id int64) err
 		}
 		return err
 	}
-	body, err := fetchSub(ctx, raw, cfg.SubUserAgent)
+	body, err := fetchSub(ctx, raw, cfg.subUA())
 	if err == nil {
 		_, err = s.ImportSource(ctx, id, body, cfg.NodeGrace)
 	}
