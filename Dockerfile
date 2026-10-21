@@ -3,6 +3,8 @@ FROM ghcr.io/sagernet/sing-box:v${SINGBOX_VERSION} AS singbox
 
 FROM golang:1.23-alpine AS build
 WORKDIR /src
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=$GOPROXY
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
