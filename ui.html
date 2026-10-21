@@ -409,7 +409,7 @@ async function showQR(title,text){
     img.src="data:image/png;base64,"+btoa(bin);
   }catch(e){ img.replaceWith(h("div",{class:"bad"},"Не удалось построить QR: "+e.message)); }
 }
-function modeName(m){ return !m?"текущий":m==="speed"?"лучшая скорость":m==="ping"?"лучший пинг":m==="spread"?"по трафику":m==="u"?"пользователи: текущий":m==="u-speed"?"пользователи: скорость":m==="u-ping"?"пользователи: пинг":/^x\d+$/.test(m)?"внешний сервер №"+m.slice(1):m; }
+function modeName(m){ return !m?"текущий":m==="speed"?"лучшая скорость":m==="ping"?"лучший пинг":m==="spread"?"по трафику":m==="stable"?"стабильный IP":m==="u"?"пользователи: текущий":m==="u-speed"?"пользователи: скорость":m==="u-ping"?"пользователи: пинг":/^x\d+$/.test(m)?"внешний сервер №"+m.slice(1):m; }
 
 // selected: list of keys, or null = "inherit" (the checkbox with o.inheritLabel is on)
 function subsPicker(selected,o){
@@ -507,7 +507,7 @@ VIEWS.overview=function(){
 async function act(path, body){ try{ const r=await api("POST",path,body||{}); toast(r.ok||"готово"); setTimeout(load,800);}catch(e){ toast(e.message,true);} }
 
 function poolChip(n){ const p=n.pool||"admin"; return h("span",{class:"tag "+(p==="admin"?"adm":p==="users"?"usr":"")},p==="admin"?"админы":p==="users"?"пользователи":"оба пула"); }
-function modeChips(n){ return (n.modes||[]).map(m=>h("span",{class:"mchip"},({speed:"скорость",ping:"пинг",spread:"трафик",u:"польз.","u-speed":"польз.: скорость","u-ping":"польз.: пинг"})[m]||m)); }
+function modeChips(n){ return (n.modes||[]).map(m=>h("span",{class:"mchip"},({speed:"скорость",ping:"пинг",spread:"трафик",stable:"стабильный IP",u:"польз.","u-speed":"польз.: скорость","u-ping":"польз.: пинг"})[m]||m)); }
 // nodeTable: the table of nodes of a pool (filter: function of a node); used by the tab of the admins and by the tab of the users' channel
 function nodeTable(rows,opts){
   opts=opts||{};
@@ -1123,6 +1123,7 @@ function vSettingsMain(){
   const defAct=h("select",{},[["proxy","через балансировщик"],["block","блокировать (белый список)"]].map(([v,t])=>h("option",{value:v,selected:v===V.default_action},t)));
   const ident=h("select",{},[["endpoint","одинаковые ссылки = один узел"],["link","каждая ссылка отдельным узлом"]].map(([v,t])=>h("option",{value:v,selected:v===V.node_identity},t)));
   const gw=h("input",{value:V.gateway_name});
+  const stableOn=h("input",{type:"checkbox",style:"width:auto",checked:V.stable_mode});
   const spreadOn=h("input",{type:"checkbox",style:"width:auto",checked:V.spread_mode});
   const margin=h("input",{type:"number",step:"0.05",min:"1",max:"3",value:V.switch_margin});
   const confirmI=h("input",{type:"number",min:"1",max:"20",value:V.switch_confirm});
@@ -1168,6 +1169,10 @@ function vSettingsMain(){
       h("div",{class:"hint"},"Переносит новые соединения на узел, который меньше всего нагружен за последний час (узлы берутся из лучшей группы по качеству). Смена узла не чаще раза в минуту (spread_interval в config.yaml); уже открытые соединения доживают на старом узле. Нужен шлюз версии 3.6.0: `update --gateway`."),
       h("label",{class:"row",style:"margin-top:10px"},spreadOn,"Показывать пользователям четвёртый балансировщик (ссылка, подписки, кабинет)")),
       ()=>save({spread_mode:spreadOn.checked})),
+    sec("Балансировщик «стабильный IP»",["stable_mode"],h("div",{},
+      h("div",{class:"hint"},"Цель: как можно дольше не менять человеку выходной IP. Узел выбирается один раз (лучший по обычным параметрам) и остаётся, пока работает: на «лучший» или «быстрее» он не переносится. Заменяется только если узел перестал работать или выход оказался в запрещённой стране."),
+      h("label",{class:"row",style:"margin-top:10px"},stableOn,"Показывать балансировщик «стабильный IP» (ссылка, подписки, кабинет)")),
+      ()=>save({stable_mode:stableOn.checked})),
     sec("Название",["gateway_name"],gw,()=>save({gateway_name:gw.value})),
     h("div",{class:"hint"},"Остальное — на вкладке «Все параметры». Канал пользователей настраивается на своей вкладке."));
 }

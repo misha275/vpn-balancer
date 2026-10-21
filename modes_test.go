@@ -85,7 +85,7 @@ func TestBuildConfigModes(t *testing.T) {
 			}
 		}
 	}
-	if strings.Join(names, ",") != "alice,alice~speed,alice~ping,alice~spread" {
+	if strings.Join(names, ",") != "alice,alice~speed,alice~ping,alice~spread,alice~stable" {
 		t.Fatalf("users of the inbound: %v", names)
 	}
 	// three selectors; the ping one starts on its own node
@@ -96,7 +96,7 @@ func TestBuildConfigModes(t *testing.T) {
 			defaults[ob["tag"].(string)] = ob["default"].(string)
 		}
 	}
-	if len(defaults) != 7 || defaults["proxy-ping"] != nodes[1].Tag() || defaults["proxy"] != nodes[0].Tag() || defaults["proxy-speed"] != nodes[0].Tag() {
+	if len(defaults) != 8 || defaults["proxy-ping"] != nodes[1].Tag() || defaults["proxy"] != nodes[0].Tag() || defaults["proxy-speed"] != nodes[0].Tag() {
 		t.Fatalf("selectors: %v", defaults)
 	}
 	// every mode has its own copy of the rules, in the same order, before the common ones; "proxy" rules lead to its own selector
@@ -117,8 +117,8 @@ func TestBuildConfigModes(t *testing.T) {
 		}
 		seq = append(seq, who+">"+out)
 	}
-	want := "alice~speed>reject,alice~speed>direct,alice~speed>proxy-speed,alice~ping>reject,alice~ping>direct,alice~ping>proxy-ping,alice~spread>reject,alice~spread>direct,alice~spread>proxy-spread," +
-		"common>reject,common>direct,common>proxy,alice~speed>proxy-speed,alice~ping>proxy-ping,alice~spread>proxy-spread"
+	want := "alice~speed>reject,alice~speed>direct,alice~speed>proxy-speed,alice~ping>reject,alice~ping>direct,alice~ping>proxy-ping,alice~spread>reject,alice~spread>direct,alice~spread>proxy-spread,alice~stable>reject,alice~stable>direct,alice~stable>proxy-stable," +
+		"common>reject,common>direct,common>proxy,alice~speed>proxy-speed,alice~ping>proxy-ping,alice~spread>proxy-spread,alice~stable>proxy-stable"
 	if got := strings.Join(seq, ","); got != want {
 		t.Fatalf("rules:\n got %s\nwant %s", got, want)
 	}

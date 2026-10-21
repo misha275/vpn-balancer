@@ -81,6 +81,10 @@ func (c *Checker) modeBest(mode string, pool []*NodeState, now time.Time) *NodeS
 			if a > b || (a == b && better(st, best)) {
 				best = st
 			}
+		case mode == modeStable:
+			if better(st, best) {
+				best = st
+			}
 		case mode == modeSpread:
 			a, b := c.spreadLoad[st.Node.ID], c.spreadLoad[best.Node.ID]
 			if a < b || (a == b && better(st, best)) {
@@ -117,6 +121,10 @@ func (c *Checker) decideModeLocked(mode string, cycle bool) (target *Node, reaso
 	if cur == nil || cur.score <= 0 || !cur.Node.Allowed(c.cfg) || !c.inPool(modeChannel(mode))(cur) {
 		c.modeCand[mode], c.modeCnt[mode] = "", 0
 		return best.Node, "failover"
+	}
+	if mode == modeStable { // only a dead or forbidden node is left: every other move would change the address
+		c.modeCand[mode], c.modeCnt[mode] = "", 0
+		return nil, ""
 	}
 	if q := c.qualityIssue(cur, now, c.cfg.getMinSpeed(), c.cfg.getRequired()); q != "" && best.Node.ID != cur.Node.ID &&
 		c.qualityIssue(best, now, c.cfg.getMinSpeed(), c.cfg.getRequired()) == "" {

@@ -95,6 +95,7 @@ type Config struct {
 	HTTPListen        string        `yaml:"http_listen"`
 
 	// --- mode "by traffic" (checker_spread.go) ---
+	StableMode     *bool         `yaml:"stable_mode"`     // show the "stable IP" balancer (default off)
 	SpreadMode     *bool         `yaml:"spread_mode"`     // show the "by traffic" balancer to users (default off)
 	SpreadInterval time.Duration `yaml:"spread_interval"` // how often the node of the mode may change (default 60s)
 

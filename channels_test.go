@@ -52,7 +52,7 @@ func TestBuildConfigHasBothChannels(t *testing.T) {
 			}
 		}
 	}
-	if got := strings.Join(names, ","); got != "alice,alice~speed,alice~ping,alice~spread,bob~u,bob~u-speed,bob~u-ping" {
+	if got := strings.Join(names, ","); got != "alice,alice~speed,alice~ping,alice~spread,alice~stable,bob~u,bob~u-speed,bob~u-ping" {
 		t.Fatalf("keys per channel: %s", got)
 	}
 	sel := map[string]bool{}
@@ -61,7 +61,7 @@ func TestBuildConfigHasBothChannels(t *testing.T) {
 			sel[ob["tag"].(string)] = true
 		}
 	}
-	for _, tag := range []string{"proxy", "proxy-speed", "proxy-ping", "proxy-spread", "proxy-u", "proxy-u-speed", "proxy-u-ping"} {
+	for _, tag := range []string{"proxy", "proxy-speed", "proxy-ping", "proxy-spread", "proxy-stable", "proxy-u", "proxy-u-speed", "proxy-u-ping"} {
 		if !sel[tag] {
 			t.Errorf("selector %s is missing: %v", tag, sel)
 		}

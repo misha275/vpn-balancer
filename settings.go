@@ -211,6 +211,18 @@ var settingDefs = []settingDef{
 		get: func(c *Config) any { return c.ExitCheck != nil && *c.ExitCheck },
 	},
 	{
+		key:  "stable_mode",
+		help: "показывать балансировщик «стабильный IP»: человек остаётся на одном узле, пока тот работает (true/false)",
+		parse: func(raw json.RawMessage) (func(*Config), error) {
+			var v bool
+			if err := json.Unmarshal(raw, &v); err != nil {
+				return nil, fmt.Errorf("stable_mode: нужно true или false")
+			}
+			return func(c *Config) { c.StableMode = &v }, nil
+		},
+		get: func(c *Config) any { return c.StableMode != nil && *c.StableMode },
+	},
+	{
 		key:  "spread_mode",
 		help: "показывать пользователям балансировщик «по трафику» (true/false)",
 		parse: func(raw json.RawMessage) (func(*Config), error) {

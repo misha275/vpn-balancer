@@ -19,6 +19,8 @@ const (
 	// modeSpread spreads the traffic: the selector is moved to the node that has carried the least traffic lately.
 	// The mode always exists inside the gateway; its links are shown to people only when spread_mode is on.
 	modeSpread = "spread"
+	// modeStable keeps the user on one node for as long as it works, so that the exit address changes as rarely as possible.
+	modeStable = "stable"
 )
 
 // Two channels of the balancer. "admin" is the pool of nodes of the operator (subscriptions of the provider), with all the
@@ -35,10 +37,10 @@ const (
 )
 
 // balModes are the extra modes (the main one of the admin channel is the empty string).
-var balModes = []string{modeSpeed, modePing, modeSpread, modeUser0, modeUserSpd, modeUserPing}
+var balModes = []string{modeSpeed, modePing, modeSpread, modeStable, modeUser0, modeUserSpd, modeUserPing}
 
 // allModes lists every mode: first the admin channel, then the users' channel.
-var allModes = []string{"", modeSpeed, modePing, modeSpread, modeUser0, modeUserSpd, modeUserPing}
+var allModes = []string{"", modeSpeed, modePing, modeSpread, modeStable, modeUser0, modeUserSpd, modeUserPing}
 
 // userChanModes are the modes of the users' channel.
 var userChanModes = []string{modeUser0, modeUserSpd, modeUserPing}
@@ -77,10 +79,14 @@ func chanModes(cfg *Config, ch string) []string {
 	if ch == chanUsers {
 		return userChanModes
 	}
+	m := []string{"", modeSpeed, modePing}
 	if cfg.spreadOn() {
-		return []string{"", modeSpeed, modePing, modeSpread}
+		m = append(m, modeSpread)
 	}
-	return []string{"", modeSpeed, modePing}
+	if cfg.stableOn() {
+		m = append(m, modeStable)
+	}
+	return m
 }
 
 // linkModes are the modes of the admin channel (what the operator sees).
@@ -114,6 +120,8 @@ func baseTitle(mode string) string {
 		return "лучший пинг"
 	case modeSpread:
 		return "по трафику"
+	case modeStable:
+		return "стабильный IP"
 	}
 	return "текущий"
 }
@@ -252,6 +260,12 @@ func (c *Config) spreadOn() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.SpreadMode != nil && *c.SpreadMode
+}
+
+func (c *Config) stableOn() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.StableMode != nil && *c.StableMode
 }
 
 func (c *Config) getSpreadInterval() time.Duration {
