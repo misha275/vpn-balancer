@@ -307,6 +307,8 @@ type fakeTG struct {
 	mu      sync.Mutex
 	updates []tgUpdate
 	sent    []string
+	markup  string // reply_markup of the last message
+	methods []string
 	srv     *httptest.Server
 }
 
@@ -327,13 +329,18 @@ func newFakeTG(t *testing.T) *fakeTG {
 			if len(ups) == 0 {
 				time.Sleep(100 * time.Millisecond)
 			}
-		case strings.HasSuffix(r.URL.Path, "/sendMessage"):
+		case strings.HasSuffix(r.URL.Path, "/sendMessage"), strings.HasSuffix(r.URL.Path, "/editMessageText"):
 			var in struct {
-				Text string `json:"text"`
+				Text   string          `json:"text"`
+				Markup json.RawMessage `json:"reply_markup"`
 			}
 			json.Unmarshal(b, &in)
 			f.sent = append(f.sent, in.Text)
+			f.markup = string(in.Markup)
+			f.methods = append(f.methods, r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:])
 			fmt.Fprint(w, `{"ok":true,"result":{}}`)
+		case strings.HasSuffix(r.URL.Path, "/answerCallbackQuery"), strings.HasSuffix(r.URL.Path, "/setChatMenuButton"):
+			fmt.Fprint(w, `{"ok":true,"result":true}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -355,6 +362,39 @@ func (f *fakeTG) say(chat int64, text string) {
 	}{Text: text}
 	u.Message.Chat.ID, u.Message.Chat.Type = chat, "private"
 	f.updates = append(f.updates, u)
+}
+
+// press sends the press of an inline button.
+func (f *fakeTG) press(chat int64, data string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u := tgUpdate{ID: int64(len(f.sent)+len(f.updates)) + 100}
+	u.Callback = &struct {
+		ID      string `json:"id"`
+		Data    string `json:"data"`
+		Message *struct {
+			ID   int64 `json:"message_id"`
+			Chat struct {
+				ID   int64  `json:"id"`
+				Type string `json:"type"`
+			} `json:"chat"`
+		} `json:"message"`
+	}{ID: "cb1", Data: data}
+	u.Callback.Message = &struct {
+		ID   int64 `json:"message_id"`
+		Chat struct {
+			ID   int64  `json:"id"`
+			Type string `json:"type"`
+		} `json:"chat"`
+	}{ID: 5}
+	u.Callback.Message.Chat.ID, u.Callback.Message.Chat.Type = chat, "private"
+	f.updates = append(f.updates, u)
+}
+
+func (f *fakeTG) lastMarkup() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.markup
 }
 
 func (f *fakeTG) last(t *testing.T, wait time.Duration) string {
@@ -423,7 +463,7 @@ func TestTelegramBot(t *testing.T) {
 		t.Fatalf("no code in the cabinet: %.400s", tgBody)
 	}
 	fake.say(chat, "/start "+m)
-	if r := fake.last(t, 5*time.Second); !strings.Contains(r, "tg@example.com") || !strings.Contains(r, "/status") {
+	if r := fake.last(t, 5*time.Second); !strings.Contains(r, "tg@example.com") || !strings.Contains(r, "Выберите действие") {
 		t.Errorf("linked: %s", r)
 	}
 	if acc2, err := st.AccountByTgChat(ctx, chat); err != nil || acc2.ID != acc.ID {
@@ -474,8 +514,48 @@ func TestTelegramBot(t *testing.T) {
 		t.Errorf("ref: %s", r)
 	}
 	fake.say(chat, "hello")
-	if r := fake.last(t, 5*time.Second); !strings.Contains(r, "/help") {
+	if r := fake.last(t, 5*time.Second); !strings.Contains(r, "Выберите действие") || !strings.Contains(fake.lastMarkup(), "Статус") {
 		t.Errorf("text: %s", r)
+	}
+	// everything by buttons: the menu has the page of the site inside Telegram (web_app)
+	fake.say(chat, "/start")
+	fake.last(t, 5*time.Second)
+	mk := fake.lastMarkup()
+	for _, want := range []string{`"callback_data":"st"`, `"callback_data":"pl"`, `"callback_data":"promo"`, `"web_app":{"url":"https://vpn.example.com`} {
+		if !strings.Contains(mk, want) {
+			t.Errorf("the menu lacks %s: %s", want, mk)
+		}
+	}
+	fake.press(chat, "st")
+	if r := fake.last(t, 5*time.Second); !strings.Contains(r, "Аккаунт № ") || fake.methods[len(fake.methods)-1] != "editMessageText" {
+		t.Errorf("button status: %s %v", r, fake.methods)
+	}
+	fake.press(chat, "pl")
+	if r := fake.last(t, 5*time.Second); !strings.Contains(r, "Выберите тариф") || !strings.Contains(fake.lastMarkup(), `"callback_data":"p:1"`) {
+		t.Errorf("button plans: %s %s", r, fake.lastMarkup())
+	}
+	fake.press(chat, "p:1")
+	if r := fake.last(t, 5*time.Second); !strings.Contains(r, "Тариф «Месяц»") || !strings.Contains(fake.lastMarkup(), `"callback_data":"pay:1"`) {
+		t.Errorf("button plan: %s", r)
+	}
+	fake.press(chat, "pay:1")
+	if r := fake.last(t, 5*time.Second); !strings.Contains(r, "Оплачено") && !strings.Contains(r, "оплата прошла") {
+		t.Errorf("button pay: %s", r)
+	}
+	fake.press(chat, "promo")
+	if r := fake.last(t, 5*time.Second); !strings.Contains(r, "промокод") {
+		t.Errorf("button promo: %s", r)
+	}
+	fake.say(chat, "NOSUCH")
+	if r := fake.last(t, 5*time.Second); !strings.Contains(r, "нет") && !strings.Contains(r, "не найден") && !strings.Contains(r, "Нет") {
+		t.Logf("promo reply: %s", r)
+	}
+	fake.press(chat, "ul")
+	if r := fake.last(t, 5*time.Second); !strings.Contains(r, "Отвязать") || !strings.Contains(fake.lastMarkup(), `"callback_data":"ul!"`) {
+		t.Errorf("button unlink asks: %s", r)
+	}
+	if _, err := st.AccountByTgChat(ctx, chat); err != nil {
+		t.Fatal("asking must not unlink")
 	}
 	fake.say(chat, "/unlink")
 	if r := fake.last(t, 5*time.Second); !strings.Contains(r, "отвязан") {

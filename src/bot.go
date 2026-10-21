@@ -37,6 +37,8 @@ type Bot struct {
 	st     *Store
 	client *http.Client
 	lim    *limiter
+	pmu    sync.Mutex
+	pend   map[int64]botPend // what the next text message of a chat means (promo code, promo code for a plan)
 }
 
 func NewBot(cfg *Config, st *Store) *Bot {
@@ -52,6 +54,17 @@ type tgUpdate struct {
 			Type string `json:"type"`
 		} `json:"chat"`
 	} `json:"message"`
+	Callback *struct {
+		ID      string `json:"id"`
+		Data    string `json:"data"`
+		Message *struct {
+			ID   int64 `json:"message_id"`
+			Chat struct {
+				ID   int64  `json:"id"`
+				Type string `json:"type"`
+			} `json:"chat"`
+		} `json:"message"`
+	} `json:"callback_query"`
 }
 
 func (b *Bot) call(ctx context.Context, method string, in, out any) error {
@@ -84,12 +97,72 @@ func (b *Bot) call(ctx context.Context, method string, in, out any) error {
 	return nil
 }
 
-func (b *Bot) send(ctx context.Context, chat int64, text string) {
-	if len([]rune(text)) > 3800 {
-		text = string([]rune(text)[:3800]) + "…"
+// Btn is a button under a message: callback data, a link, or a page that opens inside Telegram (web_app).
+type Btn struct {
+	Text string
+	Data string
+	URL  string
+	Web  string
+}
+
+func (x Btn) json() map[string]any {
+	m := map[string]any{"text": x.Text}
+	switch {
+	case x.Web != "":
+		m["web_app"] = map[string]string{"url": x.Web}
+	case x.URL != "":
+		m["url"] = x.URL
+	default:
+		m["callback_data"] = x.Data
 	}
-	if err := b.call(ctx, "sendMessage", map[string]any{"chat_id": chat, "text": text, "disable_web_page_preview": true}, nil); err != nil {
+	return m
+}
+
+// Reply is an answer of the bot: text and rows of buttons.
+type Reply struct {
+	Text string
+	Kb   [][]Btn
+}
+
+func (r Reply) markup() map[string]any {
+	rows := [][]map[string]any{}
+	for _, row := range r.Kb {
+		var out []map[string]any
+		for _, x := range row {
+			out = append(out, x.json())
+		}
+		if len(out) > 0 {
+			rows = append(rows, out)
+		}
+	}
+	return map[string]any{"inline_keyboard": rows}
+}
+
+func clipText(text string) string {
+	if len([]rune(text)) > 3800 {
+		return string([]rune(text)[:3800]) + "…"
+	}
+	return text
+}
+
+func (b *Bot) send(ctx context.Context, chat int64, r Reply) {
+	msg := map[string]any{"chat_id": chat, "text": clipText(r.Text), "disable_web_page_preview": true}
+	if len(r.Kb) > 0 {
+		msg["reply_markup"] = r.markup()
+	}
+	if err := b.call(ctx, "sendMessage", msg, nil); err != nil {
 		log.Printf("bot: %v", err)
+	}
+}
+
+// edit replaces the message under which a button was pressed (the chat stays tidy); a new message when that is impossible.
+func (b *Bot) edit(ctx context.Context, chat, msgID int64, r Reply) {
+	msg := map[string]any{"chat_id": chat, "message_id": msgID, "text": clipText(r.Text), "disable_web_page_preview": true, "reply_markup": r.markup()}
+	if err := b.call(ctx, "editMessageText", msg, nil); err != nil {
+		if strings.Contains(err.Error(), "not modified") {
+			return
+		}
+		b.send(ctx, chat, r)
 	}
 }
 
@@ -124,10 +197,11 @@ func (b *Bot) Run(ctx context.Context) {
 			botName = me.Username
 			botNameMu.Unlock()
 			log.Printf("bot: @%s is running", me.Username)
+			b.setMenuButton(ctx)
 		}
 		var ups []tgUpdate
 		c, cancel := context.WithTimeout(ctx, 35*time.Second)
-		err := b.call(c, "getUpdates", map[string]any{"offset": offset, "timeout": botPoll, "allowed_updates": []string{"message"}}, &ups)
+		err := b.call(c, "getUpdates", map[string]any{"offset": offset, "timeout": botPoll, "allowed_updates": []string{"message", "callback_query"}}, &ups)
 		cancel()
 		if err != nil {
 			if ctx.Err() == nil {
@@ -138,20 +212,30 @@ func (b *Bot) Run(ctx context.Context) {
 		}
 		for _, u := range ups {
 			offset = u.ID + 1
-			if u.Message == nil || u.Message.Chat.Type != "private" || u.Message.Text == "" {
-				continue
-			}
-			chat := u.Message.Chat.ID
-			key := strconv.FormatInt(chat, 10)
-			if b.lim.blocked(key) {
-				continue
-			}
-			b.lim.hit(key)
-			hc, hcancel := context.WithTimeout(ctx, 20*time.Second)
-			reply := b.Handle(hc, chat, u.Message.Text)
-			hcancel()
-			if reply != "" {
-				b.send(ctx, chat, reply)
+			switch {
+			case u.Callback != nil && u.Callback.Message != nil && u.Callback.Message.Chat.Type == "private":
+				chat := u.Callback.Message.Chat.ID
+				key := strconv.FormatInt(chat, 10)
+				hc, hcancel := context.WithTimeout(ctx, 20*time.Second)
+				_ = b.call(hc, "answerCallbackQuery", map[string]any{"callback_query_id": u.Callback.ID}, nil)
+				if !b.lim.blocked(key) {
+					b.lim.hit(key)
+					b.edit(hc, chat, u.Callback.Message.ID, b.Callback(hc, chat, u.Callback.Data))
+				}
+				hcancel()
+			case u.Message != nil && u.Message.Chat.Type == "private" && u.Message.Text != "":
+				chat := u.Message.Chat.ID
+				key := strconv.FormatInt(chat, 10)
+				if b.lim.blocked(key) {
+					continue
+				}
+				b.lim.hit(key)
+				hc, hcancel := context.WithTimeout(ctx, 20*time.Second)
+				reply := b.Respond(hc, chat, u.Message.Text)
+				hcancel()
+				if reply.Text != "" {
+					b.send(ctx, chat, reply)
+				}
 			}
 		}
 	}
@@ -179,7 +263,7 @@ const botHelp = `Команды:
 /ref — ссылка для приглашения друзей
 /unlink — отвязать Telegram`
 
-// Handle answers one message of a chat. It is the whole logic of the bot, apart from the network.
+// Handle answers one message of a chat with text only (the commands; Respond adds the buttons).
 func (b *Bot) Handle(ctx context.Context, chat int64, text string) string {
 	text = strings.TrimSpace(text)
 	if !strings.HasPrefix(text, "/") {
