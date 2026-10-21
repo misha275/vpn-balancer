@@ -6,7 +6,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN go vet ./... && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /balancer .
+RUN go vet ./... && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /balancer ./src
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates tzdata
