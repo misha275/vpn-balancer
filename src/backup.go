@@ -24,7 +24,7 @@ import (
 )
 
 // appVersion is written into backup names and files (kept equal to the VERSION file; a test checks it).
-const appVersion = "3.12.0"
+const appVersion = "3.12.1"
 
 const (
 	backupFormat   = "vpnb-backup"
