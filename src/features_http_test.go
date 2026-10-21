@@ -19,7 +19,7 @@ func TestSiteForumFlow(t *testing.T) {
 		t.Fatalf("forum without login: %d", code)
 	}
 	c := newSiteClient(t, srv)
-	if code, _ := c.register("ann@example.com", "password1"); code != 303 {
+	if code, _ := c.register("ann", "password1"); code != 303 {
 		t.Fatalf("register: %d", code)
 	}
 	if code, body, _ := c.get("/cabinet"); code != 200 || !strings.Contains(body, `href="/forum"`) {
@@ -41,7 +41,7 @@ func TestSiteForumFlow(t *testing.T) {
 	if strings.Contains(body, "<script>alert") || strings.Contains(body, "<b>Не") {
 		t.Error("topic text is not escaped")
 	}
-	if !strings.Contains(body, "Пользователь #") || strings.Contains(body, "ann@example.com") {
+	if !strings.Contains(body, "Пользователь #") || strings.Contains(body, "ann") {
 		t.Error("author must be anonymous")
 	}
 	if code, _, _ := c.post(loc+"/reply", url.Values{"csrf": {tok}, "body": {"Дополнение"}}, true); code != 303 {
@@ -49,9 +49,9 @@ func TestSiteForumFlow(t *testing.T) {
 	}
 	// another user sees the topic, not the e-mail
 	o := newSiteClient(t, srv)
-	o.register("bob@example.com", "password1")
+	o.register("bob", "password1")
 	_, list, _ := o.get("/forum")
-	if !strings.Contains(list, "Не открывается") || strings.Contains(list, "ann@example.com") {
+	if !strings.Contains(list, "Не открывается") || strings.Contains(list, "ann") {
 		t.Error("list wrong")
 	}
 	// the administrator closes it: users cannot answer any more
@@ -82,18 +82,18 @@ func TestSiteBlockedAccountMessages(t *testing.T) {
 	cfg := siteTestCfg()
 	_, st, srv := startSite(t, cfg)
 	c := newSiteClient(t, srv)
-	c.register("cat@example.com", "password1")
-	if err := st.BlockUser(context.Background(), "cat@example.com", "unpaid", "Нужно продлить"); err != nil {
+	c.register("cat", "password1")
+	if err := st.BlockUser(context.Background(), "cat", "unpaid", "Нужно продлить"); err != nil {
 		t.Fatal(err)
 	}
 	if _, body, _ := c.get("/cabinet"); !strings.Contains(body, "Нужно продлить") {
 		t.Error("cabinet does not show the reason")
 	}
-	if err := st.BlockUser(context.Background(), "cat@example.com", "ban", "Нарушение правил"); err != nil {
+	if err := st.BlockUser(context.Background(), "cat", "ban", "Нарушение правил"); err != nil {
 		t.Fatal(err)
 	}
 	o := newSiteClient(t, srv)
-	code, body, _ := o.post("/login", url.Values{"email": {"cat@example.com"}, "password": {"password1"}}, true)
+	code, body, _ := o.post("/login", url.Values{"username": {"cat"}, "password": {"password1"}}, true)
 	if code == 303 || !strings.Contains(body, "Нарушение правил") {
 		t.Errorf("banned login: %d", code)
 	}
@@ -121,7 +121,7 @@ func TestAdminForumBackupBlockAPI(t *testing.T) {
 		t.Fatalf("forum needs a token: %d", rr.Code)
 	}
 
-	acc, _ := st.CreateAccount(ctx, "adm@example.com", "h", 3)
+	acc, _ := st.CreateAccount(ctx, "adm", "h", 3)
 	tid, _ := st.CreateTopic(ctx, acc.ID, "idea", "Идея для панели", "Хорошая идея")
 	code, m, _ := h.do("GET", "/api/forum/topics", nil)
 	if code != 200 || m["topics"] == nil {
@@ -144,13 +144,13 @@ func TestAdminForumBackupBlockAPI(t *testing.T) {
 	}
 
 	// block / unblock through the API
-	if code, _, _ := h.do("POST", "/api/users/adm@example.com/block", map[string]any{"kind": "ban", "reason": "тест"}); code != 200 {
+	if code, _, _ := h.do("POST", "/api/users/adm/block", map[string]any{"kind": "ban", "reason": "тест"}); code != 200 {
 		t.Fatalf("block: %d", code)
 	}
-	if code, _, _ := h.do("POST", "/api/users/adm@example.com/block", map[string]any{"kind": "zzz"}); code != 400 {
+	if code, _, _ := h.do("POST", "/api/users/adm/block", map[string]any{"kind": "zzz"}); code != 400 {
 		t.Errorf("bad kind: %d", code)
 	}
-	if code, _, _ := h.do("POST", "/api/users/adm@example.com/unblock", nil); code != 200 {
+	if code, _, _ := h.do("POST", "/api/users/adm/unblock", nil); code != 200 {
 		t.Fatalf("unblock: %d", code)
 	}
 

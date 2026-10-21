@@ -75,7 +75,7 @@ func (s *siteClient) csrf() string {
 }
 
 func (s *siteClient) register(email, pass string) (int, string) {
-	code, body, _ := s.post("/register", url.Values{"email": {email}, "password": {pass}, "password2": {pass}}, true)
+	code, body, _ := s.post("/register", url.Values{"username": {email}, "password": {pass}, "password2": {pass}}, true)
 	return code, body
 }
 
@@ -219,19 +219,19 @@ func TestSiteRegistrationCabinetAndTraffic(t *testing.T) {
 		t.Fatalf("cabinet needs a login: %d", code)
 	}
 	// a form from another site is refused
-	if code, _, _ := c.post("/register", url.Values{"email": {"a@b.co"}, "password": {"password1"}, "password2": {"password1"}}, false); code != 403 {
+	if code, _, _ := c.post("/register", url.Values{"username": {"abc"}, "password": {"password1"}, "password2": {"password1"}}, false); code != 403 {
 		t.Fatalf("no Origin: %d", code)
 	}
-	if code, body := c.register("Anna@Example.com", "short"); code != 400 || !strings.Contains(body, "короче 8") {
+	if code, body := c.register("anna", "short"); code != 400 || !strings.Contains(body, "короче 8") {
 		t.Fatalf("short password: %d", code)
 	}
-	if code, body, _ := c.post("/register", url.Values{"email": {"anna@example.com"}, "password": {"password1"}, "password2": {"password2"}}, true); code != 400 || !strings.Contains(body, "не совпадают") {
+	if code, body, _ := c.post("/register", url.Values{"username": {"anna"}, "password": {"password1"}, "password2": {"password2"}}, true); code != 400 || !strings.Contains(body, "не совпадают") {
 		t.Fatalf("mismatch: %d", code)
 	}
-	if code, _, _ := c.post("/register", url.Values{"email": {"nonsense"}, "password": {"password1"}, "password2": {"password1"}}, true); code != 400 {
-		t.Fatalf("bad email: %d", code)
+	if code, _, _ := c.post("/register", url.Values{"username": {"bad name!"}, "password": {"password1"}, "password2": {"password1"}}, true); code != 400 {
+		t.Fatalf("bad username: %d", code)
 	}
-	code, _, h := c.post("/register", url.Values{"email": {"Anna@Example.com"}, "password": {"password1"}, "password2": {"password1"}}, true)
+	code, _, h := c.post("/register", url.Values{"username": {"anna"}, "password": {"password1"}, "password2": {"password1"}}, true)
 	if code != 303 || !strings.HasPrefix(h.Get("Location"), "/cabinet") {
 		t.Fatalf("register: %d %v", code, h)
 	}
@@ -239,7 +239,7 @@ func TestSiteRegistrationCabinetAndTraffic(t *testing.T) {
 		t.Errorf("session cookie must be HttpOnly and SameSite: %s", ck)
 	}
 	// the account owns a VPN user with a trial period
-	acc, err := st.AccountByEmail(context.Background(), "anna@example.com")
+	acc, err := st.AccountByUsername(context.Background(), "anna")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +249,7 @@ func TestSiteRegistrationCabinetAndTraffic(t *testing.T) {
 	if acc.PassHash == "password1" || !strings.HasPrefix(acc.PassHash, "$2") {
 		t.Fatal("passwords are stored as bcrypt hashes")
 	}
-	if code, body := c.register("anna@example.com", "password1"); code != 409 || !strings.Contains(body, "уже зарегистрирован") {
+	if code, body := c.register("anna", "password1"); code != 409 || !strings.Contains(body, "занят") {
 		t.Fatalf("duplicate: %d", code)
 	}
 	// traffic of the VPN user shows in the cabinet
@@ -258,7 +258,7 @@ func TestSiteRegistrationCabinetAndTraffic(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("cabinet: %d", code)
 	}
-	for _, want := range []string{"anna@example.com", "Активна", "осталось 3 дня", "5.00 МБ", "↑ 1.00 МБ", "↓ 4.00 МБ", "/sub/" + acc.SubToken + "\""} {
+	for _, want := range []string{"anna", "Активна", "осталось 3 дня", "5.00 МБ", "↑ 1.00 МБ", "↓ 4.00 МБ", "/sub/" + acc.SubToken + "\""} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the cabinet must show %q", want)
 		}
@@ -309,22 +309,22 @@ func TestSiteLoginLimitsAndBlock(t *testing.T) {
 	cfg := siteTestCfg()
 	_, st, srv := startSite(t, cfg)
 	c := newSiteClient(t, srv)
-	c.register("bob@example.com", "password1")
+	c.register("bob", "password1")
 	other := newSiteClient(t, srv)
-	if code, body, _ := other.post("/login", url.Values{"email": {"bob@example.com"}, "password": {"wrong-pass"}}, true); code != 401 || !strings.Contains(body, "Неверная почта или пароль") {
+	if code, body, _ := other.post("/login", url.Values{"username": {"bob"}, "password": {"wrong-pass"}}, true); code != 401 || !strings.Contains(body, "Неверный логин или пароль") {
 		t.Fatalf("wrong password: %d", code)
 	}
-	if code, body, _ := other.post("/login", url.Values{"email": {"nobody@example.com"}, "password": {"wrong-pass"}}, true); code != 401 || !strings.Contains(body, "Неверная почта или пароль") {
+	if code, body, _ := other.post("/login", url.Values{"username": {"nobody"}, "password": {"wrong-pass"}}, true); code != 401 || !strings.Contains(body, "Неверный логин или пароль") {
 		t.Fatalf("unknown email gives the same answer: %d", code)
 	}
-	if code, _, _ := other.post("/login", url.Values{"email": {"bob@example.com"}, "password": {"password1"}}, false); code != 403 {
+	if code, _, _ := other.post("/login", url.Values{"username": {"bob"}, "password": {"password1"}}, false); code != 403 {
 		t.Fatalf("login form from elsewhere: %d", code)
 	}
-	if code, _, h := other.post("/login", url.Values{"email": {"BOB@example.com"}, "password": {"password1"}}, true); code != 303 || h.Get("Location") != "/cabinet" {
+	if code, _, h := other.post("/login", url.Values{"username": {"bob"}, "password": {"password1"}}, true); code != 303 || h.Get("Location") != "/cabinet" {
 		t.Fatalf("login: %d", code)
 	}
 	// a blocked account loses the session and the key at once and cannot come back
-	acc, _ := st.AccountByEmail(context.Background(), "bob@example.com")
+	acc, _ := st.AccountByUsername(context.Background(), "bob")
 	if err := st.SetAccountBlocked(context.Background(), acc.ID, true); err != nil {
 		t.Fatal(err)
 	}
@@ -334,18 +334,18 @@ func TestSiteLoginLimitsAndBlock(t *testing.T) {
 	if us, _ := st.EnabledUsers(context.Background()); len(us) != 0 {
 		t.Error("a blocked account's key must not reach the gateway")
 	}
-	if code, body, _ := newSiteClient(t, srv).post("/login", url.Values{"email": {"bob@example.com"}, "password": {"password1"}}, true); code != 403 || !strings.Contains(body, "заблокирован") {
+	if code, body, _ := newSiteClient(t, srv).post("/login", url.Values{"username": {"bob"}, "password": {"password1"}}, true); code != 403 || !strings.Contains(body, "заблокирован") {
 		t.Errorf("blocked login: %d", code)
 	}
 	st.SetAccountBlocked(context.Background(), acc.ID, false)
-	if code, _, _ := newSiteClient(t, srv).post("/login", url.Values{"email": {"bob@example.com"}, "password": {"password1"}}, true); code != 303 {
+	if code, _, _ := newSiteClient(t, srv).post("/login", url.Values{"username": {"bob"}, "password": {"password1"}}, true); code != 303 {
 		t.Errorf("unblocked: %d", code)
 	}
 	// guessing passwords is slowed down (per address)
 	g := newSiteClient(t, srv)
 	var last int
 	for i := 0; i < 9; i++ {
-		last, _, _ = g.post("/login", url.Values{"email": {"victim@example.com"}, "password": {"guess" + string(rune('a'+i))}}, true)
+		last, _, _ = g.post("/login", url.Values{"username": {"victim"}, "password": {"guess" + string(rune('a'+i))}}, true)
 	}
 	if last != 429 {
 		t.Errorf("too many failures must be refused, got %d", last)
@@ -356,8 +356,8 @@ func TestSitePasswordChange(t *testing.T) {
 	cfg := siteTestCfg()
 	_, _, srv := startSite(t, cfg)
 	a, b := newSiteClient(t, srv), newSiteClient(t, srv)
-	a.register("carl@example.com", "password1")
-	b.post("/login", url.Values{"email": {"carl@example.com"}, "password": {"password1"}}, true)
+	a.register("carl", "password1")
+	b.post("/login", url.Values{"username": {"carl"}, "password": {"password1"}}, true)
 	tok := a.csrf()
 	if code, body, _ := a.post("/account/password", url.Values{"csrf": {tok}, "old": {"nope-nope"}, "new": {"password2"}}, true); code != 400 || !strings.Contains(body, "Текущий пароль неверный") {
 		t.Fatalf("wrong old password: %d", code)
@@ -374,10 +374,10 @@ func TestSitePasswordChange(t *testing.T) {
 	if code, _, _ := b.get("/cabinet"); code != 303 {
 		t.Error("other sessions end after a password change")
 	}
-	if code, _, _ := newSiteClient(t, srv).post("/login", url.Values{"email": {"carl@example.com"}, "password": {"password1"}}, true); code != 401 {
+	if code, _, _ := newSiteClient(t, srv).post("/login", url.Values{"username": {"carl"}, "password": {"password1"}}, true); code != 401 {
 		t.Error("the old password must not work")
 	}
-	if code, _, _ := newSiteClient(t, srv).post("/login", url.Values{"email": {"carl@example.com"}, "password": {"password2"}}, true); code != 303 {
+	if code, _, _ := newSiteClient(t, srv).post("/login", url.Values{"username": {"carl"}, "password": {"password2"}}, true); code != 303 {
 		t.Error("the new password works")
 	}
 }
@@ -387,8 +387,8 @@ func TestSitePaymentFlows(t *testing.T) {
 	_, st, srv := startSite(t, cfg)
 	ctx := context.Background()
 	c := newSiteClient(t, srv)
-	c.register("dina@example.com", "password1")
-	acc, _ := st.AccountByEmail(ctx, "dina@example.com")
+	c.register("dina", "password1")
+	acc, _ := st.AccountByUsername(ctx, "dina")
 	st.pool.Exec(ctx, "DELETE FROM plans")
 	st.pool.Exec(ctx, "DELETE FROM settings WHERE key='plans_seeded'")
 	if err := st.seedPlans(ctx); err != nil {
@@ -421,7 +421,7 @@ func TestSitePaymentFlows(t *testing.T) {
 		t.Error("the cabinet lists the pending payment")
 	}
 	pend, _ := st.ListPayments(ctx, "pending", 0, 10)
-	if len(pend) != 1 || pend[0].Email != "dina@example.com" || pend[0].Days != 30 {
+	if len(pend) != 1 || pend[0].Username != "dina" || pend[0].Days != 30 {
 		t.Fatalf("pending: %+v", pend)
 	}
 	// the administrator confirms: the period grows by the days of the plan, once
@@ -452,7 +452,7 @@ func TestSitePaymentFlows(t *testing.T) {
 	}
 	// a request for somebody else's payment page
 	other := newSiteClient(t, srv)
-	other.register("eve@example.com", "password1")
+	other.register("eve", "password1")
 	if code, _, _ := other.get("/pay/" + itoa(pend[0].ID)); code != 404 {
 		t.Errorf("foreign payment: %d", code)
 	}
@@ -460,8 +460,8 @@ func TestSitePaymentFlows(t *testing.T) {
 	// test mode: paid at once
 	cfg.SitePayment = "stub_auto"
 	e := newSiteClient(t, srv)
-	e.register("fred@example.com", "password1")
-	fa, _ := st.AccountByEmail(ctx, "fred@example.com")
+	e.register("fred", "password1")
+	fa, _ := st.AccountByUsername(ctx, "fred")
 	b4 := *fa.Expires
 	plans, _ = st.ListPlans(ctx, true)
 	_, pb, _ := e.get("/pay")
@@ -490,7 +490,7 @@ func TestSiteRegistrationClosedAndNoTrial(t *testing.T) {
 	if code, body, _ := c.get("/register"); !strings.Contains(body, "закрыта") || code != 200 {
 		t.Errorf("closed registration page: %d", code)
 	}
-	if code, _ := c.register("x@example.com", "password1"); code != 403 {
+	if code, _ := c.register("xxx", "password1"); code != 403 {
 		t.Errorf("registration when closed: %d", code)
 	}
 	if code, body, _ := c.get("/"); strings.Contains(body, "Регистрация") || code != 200 {
@@ -498,10 +498,10 @@ func TestSiteRegistrationClosedAndNoTrial(t *testing.T) {
 	}
 	on := true
 	cfg.SiteRegistration = &on
-	if code, _ := c.register("y@example.com", "password1"); code != 303 {
+	if code, _ := c.register("yyy", "password1"); code != 303 {
 		t.Fatalf("registration reopened: %d", code)
 	}
-	acc, _ := st.AccountByEmail(context.Background(), "y@example.com")
+	acc, _ := st.AccountByUsername(context.Background(), "yyy")
 	if us, _ := st.EnabledUsers(context.Background()); len(us) != 0 || acc.User().Active(time.Now()) {
 		t.Error("without a trial the key works only after a payment")
 	}
@@ -519,8 +519,8 @@ func TestDeletingAccountRemovesTheUser(t *testing.T) {
 	_, st, srv := startSite(t, cfg)
 	ctx := context.Background()
 	c := newSiteClient(t, srv)
-	c.register("gone@example.com", "password1")
-	acc, _ := st.AccountByEmail(ctx, "gone@example.com")
+	c.register("gone", "password1")
+	acc, _ := st.AccountByUsername(ctx, "gone")
 	st.AddTraffic(ctx, time.Now(), map[string]UserDelta{acc.UserName: {Up: 5}})
 	if err := st.DeleteAccount(ctx, acc.ID); err != nil {
 		t.Fatal(err)
@@ -528,7 +528,7 @@ func TestDeletingAccountRemovesTheUser(t *testing.T) {
 	if us, _ := st.ListUsers(ctx); len(us) != 0 {
 		t.Error("the VPN user goes with the account")
 	}
-	if _, err := st.AccountByEmail(ctx, "gone@example.com"); err == nil {
+	if _, err := st.AccountByUsername(ctx, "gone"); err == nil {
 		t.Error("account must be gone")
 	}
 	if tr, _ := st.UserTrafficOf(ctx, acc.UserName); tr.AllUp != 0 {
@@ -539,10 +539,10 @@ func TestDeletingAccountRemovesTheUser(t *testing.T) {
 	}
 	// and deleting the user from the Users tab removes the account
 	c2 := newSiteClient(t, srv)
-	c2.register("two@example.com", "password1")
-	a2, _ := st.AccountByEmail(ctx, "two@example.com")
+	c2.register("two", "password1")
+	a2, _ := st.AccountByUsername(ctx, "two")
 	st.DeleteUser(ctx, a2.UserName)
-	if _, err := st.AccountByEmail(ctx, "two@example.com"); err == nil {
+	if _, err := st.AccountByUsername(ctx, "two"); err == nil {
 		t.Error("deleting the user deletes the account")
 	}
 }

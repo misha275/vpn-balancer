@@ -30,7 +30,7 @@ func TestSiteDemo(t *testing.T) {
 	for i, e := range []struct {
 		email string
 		days  int
-	}{{"anna@example.com", 21}, {"boris@example.com", 3}, {"clara@example.com", 0}} {
+	}{{"anna", 21}, {"boris", 3}, {"clara", 0}} {
 		acc, err := st.CreateAccount(ctx, e.email, string(hash), e.days)
 		if err != nil {
 			t.Fatal(err)
@@ -61,7 +61,7 @@ func TestSiteDemo(t *testing.T) {
 	st.SaveBundle(ctx, Bundle{Slug: "games", Name: "Игры", Enabled: true, Sort: 1, Nodes: []int64{n3}})
 	for d := 0; d < 30; d++ {
 		if d%4 != 3 {
-			st.AddTraffic(ctx, time.Now().Add(-time.Duration(d*24+d%5)*time.Hour), map[string]UserDelta{"anna@example.com": {Up: int64(20+d*7%40) << 20, Down: int64(300+d*53%900) << 20, Conns: int64(30 + d)}})
+			st.AddTraffic(ctx, time.Now().Add(-time.Duration(d*24+d%5)*time.Hour), map[string]UserDelta{"anna": {Up: int64(20+d*7%40) << 20, Down: int64(300+d*53%900) << 20, Conns: int64(30 + d)}})
 		}
 	}
 	st.pool.Exec(ctx, "DELETE FROM plans")
@@ -72,9 +72,9 @@ func TestSiteDemo(t *testing.T) {
 	pl0[2].Subs = []string{"balancers", "all", "b:vip", "b:games"}
 	st.SavePlan(ctx, pl0[1])
 	st.SavePlan(ctx, pl0[2])
-	st.SetUserSubs(ctx, "clara@example.com", []string{"balancers", "b:games"})
+	st.SetUserSubs(ctx, "clara", []string{"balancers", "b:games"})
 	plans, _ := st.ListPlans(ctx, true)
-	acc, _ := st.AccountByEmail(ctx, "boris@example.com")
+	acc, _ := st.AccountByUsername(ctx, "boris")
 	if len(plans) > 0 {
 		st.CreatePayment(ctx, acc.ID, plans[0], "stub")
 	}

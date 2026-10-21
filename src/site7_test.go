@@ -197,7 +197,7 @@ func TestForumAttachments(t *testing.T) {
 	ctx := context.Background()
 	st.pool.Exec(ctx, "TRUNCATE forum_topics CASCADE")
 	c := newSiteClient(t, srv)
-	c.register("att@example.com", "password1")
+	c.register("att", "password1")
 	tok := c.csrf()
 	img := pngBytes(40, 30)
 	newTopic := func(parts []part) (int, string, string) {
@@ -286,7 +286,7 @@ func TestForumAttachments(t *testing.T) {
 	}
 	// the quota of an account
 	var acc int64
-	st.pool.QueryRow(ctx, `SELECT id FROM accounts WHERE email='att@example.com'`).Scan(&acc)
+	st.pool.QueryRow(ctx, `SELECT id FROM accounts WHERE username='att'`).Scan(&acc)
 	st.pool.Exec(ctx, `UPDATE forum_files SET size=$2 WHERE id=$1`, m2[1], int64(forumUserQuota))
 	if code, body, _ := c.multipart("/forum/"+id+"/reply", map[string]string{"csrf": tok, "body": "ещё"}, []part{{"file", "q.bin", []byte("1234567890")}}); code != 400 || !strings.Contains(body, "лимит вложений") {
 		t.Fatalf("quota: %d %s", code, body)
@@ -298,7 +298,7 @@ func TestAdminForumAttachmentsHaveNoLimits(t *testing.T) {
 	_, st, _ := startSite(t, cfg)
 	ctx := context.Background()
 	st.pool.Exec(ctx, "TRUNCATE forum_topics CASCADE")
-	acc, _ := st.CreateAccount(ctx, "adm2@example.com", "h", 3)
+	acc, _ := st.CreateAccount(ctx, "adm2", "h", 3)
 	tid, _ := st.CreateTopic(ctx, acc.ID, "bug", "Для админа", "Вопрос по файлам")
 	a := NewAPI(cfg, st, nil, nil, "tok", make(chan struct{}, 1))
 	mux := http.NewServeMux()
@@ -364,9 +364,9 @@ func TestSubscriptionHeadersShowUsageAndExpiry(t *testing.T) {
 	_, st, srv := startSite(t, cfg)
 	ctx := context.Background()
 	c := newSiteClient(t, srv)
-	c.register("hdr@example.com", "password1")
-	acc, _ := st.AccountByEmail(ctx, "hdr@example.com")
-	st.pool.Exec(ctx, `INSERT INTO traffic_hourly(hour,user_name,up,down,conns) VALUES(date_trunc('hour',now()),$1,2048,1048576,3)`, acc.Email)
+	c.register("hdr", "password1")
+	acc, _ := st.AccountByUsername(ctx, "hdr")
+	st.pool.Exec(ctx, `INSERT INTO traffic_hourly(hour,user_name,up,down,conns) VALUES(date_trunc('hour',now()),$1,2048,1048576,3)`, acc.Username)
 	u, _ := st.UserBySubToken(ctx, acc.SubToken)
 	code, _, h := c.get("/sub/" + u.SubToken)
 	if code != 200 {
@@ -384,7 +384,7 @@ func TestSubscriptionHeadersShowUsageAndExpiry(t *testing.T) {
 	if want := cfg.SiteName + " · hdr"; string(raw) != want {
 		t.Fatalf("title %q, want %q (the VPN name, a dot, the nick; no traffic in the name)", raw, want)
 	}
-	if err := st.SetNick(ctx, acc.Email, "Миша"); err != nil {
+	if err := st.SetNick(ctx, acc.Username, "Миша"); err != nil {
 		t.Fatal(err)
 	}
 	_, _, h = c.get("/sub/" + u.SubToken)
@@ -392,10 +392,10 @@ func TestSubscriptionHeadersShowUsageAndExpiry(t *testing.T) {
 	if string(raw) != cfg.SiteName+" · Миша" {
 		t.Fatalf("title after nick change: %q", raw)
 	}
-	if st.SetNick(ctx, acc.Email, "  ") == nil || st.SetNick(ctx, acc.Email, "a<b") == nil || st.SetNick(ctx, acc.Email, strings.Repeat("я", 33)) == nil {
+	if st.SetNick(ctx, acc.Username, "  ") == nil || st.SetNick(ctx, acc.Username, "a<b") == nil || st.SetNick(ctx, acc.Username, strings.Repeat("я", 33)) == nil {
 		t.Error("bad nicks must be refused")
 	}
-	st.pool.Exec(ctx, `UPDATE users SET expires_at=NULL WHERE name=$1`, acc.Email)
+	st.pool.Exec(ctx, `UPDATE users SET expires_at=NULL WHERE name=$1`, acc.Username)
 	_, _, h = c.get("/sub/" + u.SubToken)
 	if !strings.Contains(h.Get("subscription-userinfo"), "expire=0") {
 		t.Errorf("no end date means expire=0: %q", h.Get("subscription-userinfo"))

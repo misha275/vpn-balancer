@@ -33,12 +33,14 @@ type Config struct {
 	UsersSubscriptions []string `yaml:"users_subscriptions"`
 	SiteChannel        string   `yaml:"site_channel"` // channel of the people who register on the site: users (default) or admin
 	// the service around the balancer (service_config.go)
-	RefBonusDays    *int          `yaml:"ref_bonus_days"`     // days for the one who invited a person that paid (default 7)
-	RefBonusPercent int           `yaml:"ref_bonus_percent"`  // percent of his first payment that goes to the balance of the one who invited
-	RefInviteeDays  int           `yaml:"ref_invitee_days"`   // days for the invited person with his first payment
-	PayWebhookKey   string        `yaml:"pay_webhook_secret"` // the secret of the payment callback /pay/webhook/{provider}; empty = the callback is off
-	BotToken        string        `yaml:"bot_token"`          // Telegram bot token (empty = no bot)
-	BotAPI          string        `yaml:"bot_api_url"`        // Telegram API address (for tests and proxies; default https://api.telegram.org)
+	RefBonusDays    *int          `yaml:"ref_bonus_days"`       // days for the one who invited a person that paid (default 7)
+	RefBonusPercent int           `yaml:"ref_bonus_percent"`    // percent of his first payment that goes to the balance of the one who invited
+	RefInviteeDays  int           `yaml:"ref_invitee_days"`     // days for the invited person with his first payment
+	PayWebhookKey   string        `yaml:"pay_webhook_secret"`   // the secret of the payment callback /pay/webhook/{provider}; empty = the callback is off
+	GoogleID        string        `yaml:"google_client_id"`     // Google sign-in: OAuth client id (empty = no Google button)
+	GoogleSecret    string        `yaml:"google_client_secret"` // Google sign-in: OAuth client secret
+	BotToken        string        `yaml:"bot_token"`            // Telegram bot token (empty = no bot)
+	BotAPI          string        `yaml:"bot_api_url"`          // Telegram API address (for tests and proxies; default https://api.telegram.org)
 	SubUserAgent    string        `yaml:"sub_user_agent"`
 	SubRefresh      time.Duration `yaml:"sub_refresh"`
 	NodeGrace       time.Duration `yaml:"node_grace"`

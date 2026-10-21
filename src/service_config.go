@@ -60,6 +60,10 @@ func init() {
 			func(c *Config, v int) { c.RefInviteeDays = v }, func(c *Config) int { return c.RefInviteeDays }),
 		strSetting("pay_webhook_secret", "секрет обратного вызова платёжной системы /pay/webhook/{провайдер} (подпись HMAC-SHA256); пусто — вызов выключен", 100, nil,
 			func(c *Config, v string) { c.PayWebhookKey = v }, func(c *Config) string { return c.PayWebhookKey }),
+		strSetting("google_client_id", "вход через Google: Client ID из Google Cloud Console (OAuth 2.0, веб-приложение); пусто — кнопки Google нет. Адрес перенаправления: https://ВАШ_ДОМЕН/auth/google/callback", 200, nil,
+			func(c *Config, v string) { c.GoogleID = v }, func(c *Config) string { return c.GoogleID }),
+		strSetting("google_client_secret", "вход через Google: Client secret", 200, nil,
+			func(c *Config, v string) { c.GoogleSecret = v }, func(c *Config) string { return c.GoogleSecret }),
 		strSetting("bot_token", "токен Telegram-бота (от @BotFather); пусто — бота нет", 100,
 			func(v string) error {
 				if v != "" && !reBotToken.MatchString(v) {

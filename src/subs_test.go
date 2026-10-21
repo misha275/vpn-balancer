@@ -166,7 +166,7 @@ func TestPlanSubscriptionsAndPriority(t *testing.T) {
 		t.Error("a bad key in a plan")
 	}
 	hash := "x"
-	acc, _ := st.CreateAccount(ctx, "plan@example.com", hash, 3)
+	acc, _ := st.CreateAccount(ctx, "plan", hash, 3)
 	keys := func() ([]string, string) {
 		a, _ := st.AccountByID(ctx, acc.ID)
 		return effectiveSubs(cfg, a.User())

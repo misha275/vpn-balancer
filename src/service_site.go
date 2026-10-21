@@ -154,14 +154,14 @@ func (s *Site) redeemPromo(w http.ResponseWriter, r *http.Request) {
 	if acc == nil {
 		return
 	}
-	if s.payAcc.blocked("promo:" + acc.Email) {
+	if s.payAcc.blocked("promo:" + acc.Username) {
 		s.renderCabinet(w, r, acc, h, 429, "", "Слишком много попыток. Попробуйте позже", nil)
 		return
 	}
 	msg, err := s.st.RedeemPromo(r.Context(), acc.ID, r.PostForm.Get("promo"))
 	if err != nil {
 		if errors.Is(err, ErrNoPromo) {
-			s.payAcc.hit("promo:" + acc.Email) // guessing codes is limited
+			s.payAcc.hit("promo:" + acc.Username) // guessing codes is limited
 		}
 		code := 400
 		if !errors.Is(err, ErrNoPromo) && !errors.Is(err, ErrPromoUsed) && !errors.Is(err, ErrPromoKind) {
@@ -207,7 +207,7 @@ func (s *Site) topupPost(w http.ResponseWriter, r *http.Request) {
 		s.renderCabinet(w, r, acc, h, 403, "", "Онлайн-оплата сейчас выключена", nil)
 		return
 	}
-	if s.payAcc.blocked(acc.Email) {
+	if s.payAcc.blocked(acc.Username) {
 		s.renderCabinet(w, r, acc, h, 429, "", "Слишком много заявок. Попробуйте позже", nil)
 		return
 	}
@@ -220,7 +220,7 @@ func (s *Site) topupPost(w http.ResponseWriter, r *http.Request) {
 		s.renderCabinet(w, r, acc, h, 409, "", "У вас уже есть неподтверждённые заявки. Дождитесь подтверждения", nil)
 		return
 	}
-	s.payAcc.hit(acc.Email)
+	s.payAcc.hit(acc.Username)
 	pay, err := s.st.CreateTopup(r.Context(), acc.ID, cents, s.siteCurrency(r.Context()), prov.Name())
 	if err != nil {
 		log.Printf("site: topup: %v", err)

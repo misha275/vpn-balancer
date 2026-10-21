@@ -220,17 +220,17 @@ func TestAdminSiteAPI(t *testing.T) {
 	}
 
 	// accounts
-	code, m, _ := h.do("POST", "/api/accounts", map[string]any{"email": "Admin.Made@Example.com", "days": 10})
-	if code != 200 || m["password"] == "" || m["email"] != "admin.made@example.com" {
+	code, m, _ := h.do("POST", "/api/accounts", map[string]any{"username": "Admin_Made", "days": 10})
+	if code != 200 || m["password"] == "" || m["username"] != "admin_made" {
 		t.Fatalf("create account: %d %v", code, m)
 	}
-	if code, _, _ := h.do("POST", "/api/accounts", map[string]any{"email": "admin.made@example.com"}); code != 409 {
+	if code, _, _ := h.do("POST", "/api/accounts", map[string]any{"username": "admin_made"}); code != 409 {
 		t.Errorf("duplicate: %d", code)
 	}
-	if code, _, _ := h.do("POST", "/api/accounts", map[string]any{"email": "bad", "days": 1}); code != 400 {
-		t.Errorf("bad email: %d", code)
+	if code, _, _ := h.do("POST", "/api/accounts", map[string]any{"username": "b a", "days": 1}); code != 400 {
+		t.Errorf("bad username: %d", code)
 	}
-	acc, err := st.AccountByEmail(context.Background(), "admin.made@example.com")
+	acc, err := st.AccountByUsername(context.Background(), "admin_made")
 	if err != nil || acc.Expires == nil {
 		t.Fatalf("account: %v %+v", err, acc)
 	}

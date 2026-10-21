@@ -184,7 +184,7 @@ func TestChannelNodesInSubscriptionAndStore(t *testing.T) {
 		t.Errorf("pools: %v", pools)
 	}
 	// users: a channel can be changed, and a user registered on the site lands in the configured one
-	st.pool.Exec(ctx, "DELETE FROM users WHERE name IN ('ch-a','chreg@example.com')")
+	st.pool.Exec(ctx, "DELETE FROM users WHERE name IN ('ch-a','chreg')")
 	st.AddUser(ctx, "ch-a")
 	if err := st.SetChannel(ctx, "ch-a", chanUsers); err != nil {
 		t.Fatal(err)
@@ -192,7 +192,7 @@ func TestChannelNodesInSubscriptionAndStore(t *testing.T) {
 	if err := st.SetChannel(ctx, "ch-a", "weird"); err == nil {
 		t.Error("an unknown channel is refused")
 	}
-	if _, err := st.CreateAccountIn(ctx, "chreg@example.com", "h", 3, chanUsers); err != nil {
+	if _, err := st.CreateAccountIn(ctx, "chreg", "h", 3, chanUsers); err != nil {
 		t.Fatal(err)
 	}
 	us, _ := st.ListUsers(ctx)
@@ -200,7 +200,7 @@ func TestChannelNodesInSubscriptionAndStore(t *testing.T) {
 	for _, u := range us {
 		ch[u.Name] = u.Chan()
 	}
-	if ch["ch-a"] != chanUsers || ch["chreg@example.com"] != chanUsers {
+	if ch["ch-a"] != chanUsers || ch["chreg"] != chanUsers {
 		t.Errorf("channels: %v", ch)
 	}
 }

@@ -206,13 +206,16 @@ func sameOrigin(r *http.Request) bool {
 type pageData struct {
 	Title, Site, Support string
 	Nonce                string
-	Email, CSRF          string
+	Login, CSRF          string
 	Nick                 string
 	UserNo               int64
 	CanRegister          bool
 	Trial                string
 	Error, Flash         string
-	FormEmail            string
+	FormUser             string
+	Google, Telegram     bool
+	TgLink               string
+	HasPass              bool
 	Plans                []planView
 	Payment              string
 	Forum                forumData
@@ -267,7 +270,7 @@ func (s *Site) base(r *http.Request, acc *Account, hash, title string) pageData 
 		d.PaletteOpts = append(d.PaletteOpts, paletteOpt{p.ID, p.Title, p.Light, p.ID == pf.Palette})
 	}
 	if acc != nil {
-		d.Email, d.CSRF = acc.Email, s.csrf(hash)
+		d.Login, d.CSRF = acc.Username, s.csrf(hash)
 	}
 	return d
 }
@@ -339,6 +342,10 @@ func (s *Site) Handler() http.Handler {
 	mux.HandleFunc("POST /login", s.loginPost)
 	mux.HandleFunc("GET /register", s.registerPage)
 	mux.HandleFunc("POST /register", s.registerPost)
+	mux.HandleFunc("POST /auth/telegram", s.telegramStart)
+	mux.HandleFunc("GET /auth/telegram/check", s.telegramCheck)
+	mux.HandleFunc("GET /auth/google", s.googleStart)
+	mux.HandleFunc("GET /auth/google/callback", s.googleCallback)
 	mux.HandleFunc("POST /logout", s.logout)
 	mux.HandleFunc("GET /cabinet", s.cabinet)
 	mux.HandleFunc("POST /account/password", s.changePassword)
@@ -398,13 +405,16 @@ func (s *Site) loginPage(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/cabinet", http.StatusSeeOther)
 		return
 	}
-	s.render(w, 200, "login", s.base(r, nil, "", "Вход"))
+	d := s.base(r, nil, "", "Вход")
+	s.authOptions(&d)
+	s.render(w, 200, "login", d)
 }
 
 func normEmail(e string) string { return strings.ToLower(strings.TrimSpace(e)) }
 
 func (s *Site) loginPost(w http.ResponseWriter, r *http.Request) {
 	d := s.base(r, nil, "", "Вход")
+	s.authOptions(&d)
 	fail := func(code int, msg string) {
 		d.Error = msg
 		s.render(w, code, "login", d)
@@ -417,23 +427,23 @@ func (s *Site) loginPost(w http.ResponseWriter, r *http.Request) {
 		fail(400, "Неверный запрос")
 		return
 	}
-	email, pass := normEmail(r.PostForm.Get("email")), r.PostForm.Get("password")
-	d.FormEmail = email
+	name, pass := normUsername(r.PostForm.Get("username")), r.PostForm.Get("password")
+	d.FormUser = name
 	ip := clientIP(r)
-	if s.loginIP.blocked(ip) || s.loginMail.blocked(email) {
+	if s.loginIP.blocked(ip) || s.loginMail.blocked(name) {
 		fail(429, "Слишком много попыток. Подождите 10 минут")
 		return
 	}
-	acc, err := s.st.AccountByEmail(r.Context(), email)
-	hash := s.dummyHash // the same work for an unknown address, so the answer time does not tell whether it exists
-	if err == nil {
+	acc, err := s.st.AccountByUsername(r.Context(), name)
+	hash := s.dummyHash // the same work for an unknown name, so the answer time does not tell whether it exists
+	if err == nil && acc.PassHash != "" {
 		hash = []byte(acc.PassHash)
 	}
 	okPass := bcrypt.CompareHashAndPassword(hash, []byte(pass)) == nil
-	if err != nil || !okPass {
+	if err != nil || acc.PassHash == "" || !okPass {
 		s.loginIP.hit(ip)
-		s.loginMail.hit(email)
-		fail(401, "Неверная почта или пароль")
+		s.loginMail.hit(name)
+		fail(401, "Неверный логин или пароль")
 		return
 	}
 	if acc.Blocked {
@@ -444,7 +454,7 @@ func (s *Site) loginPost(w http.ResponseWriter, r *http.Request) {
 		fail(403, msg+" Обратитесь в поддержку")
 		return
 	}
-	s.loginMail.clear(email)
+	s.loginMail.clear(name)
 	if err := s.startSession(w, r, acc); err != nil {
 		log.Printf("site: session: %v", err)
 		fail(500, "Временная ошибка, попробуйте ещё раз")
@@ -459,6 +469,7 @@ func (s *Site) registerPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d := s.base(r, nil, "", "Регистрация")
+	s.authOptions(&d)
 	if !d.CanRegister {
 		s.render(w, 200, "closed", d)
 		return
@@ -469,20 +480,21 @@ func (s *Site) registerPage(w http.ResponseWriter, r *http.Request) {
 	s.render(w, 200, "register", d)
 }
 
-func checkPassword(p, email string) string {
+func checkPassword(p, login string) string {
 	switch {
 	case len(p) < minPassBytes:
 		return "Пароль короче 8 символов"
 	case len(p) > maxPassBytes:
 		return "Пароль длиннее 72 байт"
-	case strings.EqualFold(p, email):
-		return "Пароль не должен совпадать с почтой"
+	case strings.EqualFold(p, login):
+		return "Пароль не должен совпадать с логином"
 	}
 	return ""
 }
 
 func (s *Site) registerPost(w http.ResponseWriter, r *http.Request) {
 	d := s.base(r, nil, "", "Регистрация")
+	s.authOptions(&d)
 	if !d.CanRegister {
 		s.render(w, 403, "closed", d)
 		return
@@ -500,8 +512,8 @@ func (s *Site) registerPost(w http.ResponseWriter, r *http.Request) {
 		fail(400, "Неверный запрос")
 		return
 	}
-	email, p1, p2 := normEmail(r.PostForm.Get("email")), r.PostForm.Get("password"), r.PostForm.Get("password2")
-	d.FormEmail = email
+	name, p1, p2 := normUsername(r.PostForm.Get("username")), r.PostForm.Get("password"), r.PostForm.Get("password2")
+	d.FormUser = name
 	if c := r.PostForm.Get("ref"); reRefCode.MatchString(c) {
 		d.Svc.Ref = c
 	}
@@ -511,14 +523,14 @@ func (s *Site) registerPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
-	case len(email) > 120 || !reEmail.MatchString(email):
-		fail(400, "Введите настоящий адрес почты")
+	case !validUsername(name):
+		fail(400, "Логин: 3–24 символа, маленькие латинские буквы, цифры и _")
 		return
 	case p1 != p2:
 		fail(400, "Пароли не совпадают")
 		return
 	}
-	if msg := checkPassword(p1, email); msg != "" {
+	if msg := checkPassword(p1, name); msg != "" {
 		fail(400, msg)
 		return
 	}
@@ -528,9 +540,9 @@ func (s *Site) registerPost(w http.ResponseWriter, r *http.Request) {
 		fail(500, "Временная ошибка, попробуйте ещё раз")
 		return
 	}
-	acc, err := s.st.CreateAccountIn(r.Context(), email, string(hash), s.cfg.getSite().TrialDays, s.cfg.getSiteChannel())
-	if errors.Is(err, ErrEmailTaken) {
-		fail(409, "Этот адрес уже зарегистрирован. Попробуйте войти")
+	acc, err := s.st.CreateAccountIn(r.Context(), name, string(hash), s.cfg.getSite().TrialDays, s.cfg.getSiteChannel())
+	if errors.Is(err, ErrNameTaken) {
+		fail(409, "Этот логин занят. Выберите другой или войдите")
 		return
 	}
 	if err != nil {
@@ -619,6 +631,7 @@ func (s *Site) cabinetData(r *http.Request, acc *Account, h string) pageData {
 	}
 	d.Created = acc.Created.UTC().Format("02.01.2006")
 	d.Nick, d.UserNo = acc.User().DisplayNick(), acc.UserID
+	d.HasPass = acc.PassHash != ""
 	if t, err := s.st.UserTrafficOf(r.Context(), acc.UserName); err == nil {
 		d.TrafficAll, d.Traffic30 = fmtBytesRu(t.AllUp+t.AllDown), fmtBytesRu(t.D30Up+t.D30Down)
 		d.UpAll, d.DownAll = fmtBytesRu(t.AllUp), fmtBytesRu(t.AllDown)
@@ -678,16 +691,17 @@ func (s *Site) changePassword(w http.ResponseWriter, r *http.Request) {
 		d.Error = msg
 		s.render(w, code, "cabinet", d)
 	}
-	if s.loginMail.blocked(acc.Email) {
+	if s.loginMail.blocked(acc.Username) {
 		renderErr(429, "Слишком много попыток. Подождите 10 минут")
 		return
 	}
-	if bcrypt.CompareHashAndPassword([]byte(acc.PassHash), []byte(old)) != nil {
-		s.loginMail.hit(acc.Email)
+	// an account that came through Telegram or Google has no password yet: it may set one without the old one
+	if acc.PassHash != "" && bcrypt.CompareHashAndPassword([]byte(acc.PassHash), []byte(old)) != nil {
+		s.loginMail.hit(acc.Username)
 		renderErr(400, "Текущий пароль неверный")
 		return
 	}
-	if msg := checkPassword(nw, acc.Email); msg != "" {
+	if msg := checkPassword(nw, acc.Username); msg != "" {
 		renderErr(400, msg)
 		return
 	}
@@ -760,7 +774,7 @@ func (s *Site) payPost(w http.ResponseWriter, r *http.Request) {
 		fail(403, "Онлайн-оплата сейчас выключена")
 		return
 	}
-	if s.payAcc.blocked(acc.Email) {
+	if s.payAcc.blocked(acc.Username) {
 		fail(429, "Слишком много заявок. Попробуйте позже")
 		return
 	}
@@ -793,7 +807,7 @@ func (s *Site) payPost(w http.ResponseWriter, r *http.Request) {
 		fail(409, "У вас уже есть неподтверждённые заявки. Дождитесь подтверждения")
 		return
 	}
-	s.payAcc.hit(acc.Email)
+	s.payAcc.hit(acc.Username)
 	pay, err := s.st.CreatePaymentPromo(r.Context(), acc.ID, *plan, prov.Name(), promo)
 	if errors.Is(err, ErrNoPromo) || errors.Is(err, ErrPromoUsed) || errors.Is(err, ErrNotDiscount) {
 		fail(400, err.Error())

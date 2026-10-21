@@ -85,7 +85,7 @@ func TestCabinetNick(t *testing.T) {
 	cfg := siteTestCfg()
 	_, st, srv := startSite(t, cfg)
 	c := newSiteClient(t, srv)
-	c.register("nick@example.com", "password1")
+	c.register("nick", "password1")
 	ctx := context.Background()
 	code, body, _ := c.get("/cabinet")
 	if code != 200 || !strings.Contains(body, "Аккаунт №") {
@@ -95,13 +95,13 @@ func TestCabinetNick(t *testing.T) {
 	if code != 303 && code != 200 {
 		t.Fatalf("nick change: %d %s", code, body)
 	}
-	acc, _ := st.AccountByEmail(ctx, "nick@example.com")
+	acc, _ := st.AccountByUsername(ctx, "nick")
 	if acc.Nick != "Мишаня" {
 		t.Errorf("nick saved: %q", acc.Nick)
 	}
 	id := acc.UserID
 	st.SetNick(ctx, acc.UserName, "Другой")
-	acc, _ = st.AccountByEmail(ctx, "nick@example.com")
+	acc, _ = st.AccountByUsername(ctx, "nick")
 	if acc.UserID != id {
 		t.Error("the number never changes")
 	}

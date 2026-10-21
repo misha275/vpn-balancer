@@ -582,7 +582,7 @@ function filteredUsers(){
   const q=UF.q.trim().toLowerCase();
   let rows=USERS.filter(u=>{
     const a=accOf(u);
-    if(q&&!(String(u.id)+" "+u.nick+" "+u.name+" "+(a?a.email:"")).toLowerCase().includes(q)) return false;
+    if(q&&!(String(u.id)+" "+u.nick+" "+u.name+" "+(a?(a.username||a.email):"")).toLowerCase().includes(q)) return false;
     if(UF.ch!=="all"&&u.channel!==UF.ch) return false;
     if(UF.st!=="all"){ const k=userState(u)[2]; if(UF.st==="active"?!(k==="active"||k==="soon"):k!==UF.st) return false; }
     return true; });
@@ -611,7 +611,7 @@ function uPeople(){
 function uRow(u){
   const a=accOf(u), st=userState(u);
   return h("div",{class:"urow ch-"+u.channel+(u.name===USEL?" sel":""),onclick:()=>selUser(u.name)},
-    h("div",{},h("b",{},"№"+u.id+" "+u.nick),u.channel==="admin"?h("span",{class:"tag adm"},"админ"):null,h("span",{class:"muted"}," · "+(a?a.email:u.name))),
+    h("div",{},h("b",{},"№"+u.id+" "+u.nick),u.channel==="admin"?h("span",{class:"tag adm"},"админ"):null,h("span",{class:"muted"}," · "+(a?(a.username||a.email):u.name))),
     h("div",{class:st[1],style:"text-align:right"},st[0]),
     h("div",{class:"l2"},h("span",{},u.expires?"до "+fmtDay(u.expires):"без срока"),h("span",{},"30 дн.: "+fmtBytes(u.traffic_30)),u.last_seen?h("span",{},"был "+fmtAgo(u.last_seen)):h("span",{},"не был"),a?h("span",{},"баланс "+fmtMoneyC(a.balance_cents)):null));
 }
@@ -632,7 +632,7 @@ function uDetail(u){
         h("span",{class:"pill "+st[1]},st[0]),
         h("button",{class:"b s",title:"открыть этого человека в отдельной вкладке браузера",onclick:()=>window.open(location.pathname+"#users/people/"+encodeURIComponent(u.name),"_blank")},"↗ вкладка"),
         h("button",{class:"b s",title:"закрыть карточку",onclick:closeUser},"✕")),
-      h("div",{class:"muted",style:"margin:4px 0 0"},"имя: "+u.name+(a?" · почта: "+a.email:" · создан в панели, на сайт не заходит")),
+      h("div",{class:"muted",style:"margin:4px 0 0"},"имя: "+u.name+(a?" · логин: "+(a.username||a.email):" · создан в панели, на сайт не заходит")),
       uTabs(u,a)),
     h("div",{class:"db"},body));
 }
@@ -730,9 +730,9 @@ function dLinks(u){
 function dAccount(u,a){
   const note=h("input",{value:a.note||"",class:"grow",maxlength:500,placeholder:"заметка (видите только вы)"});
   const dl=h("input",{type:"number",step:"0.01",placeholder:"сумма ± (100 или -50)",style:"width:170px"}), bn=h("input",{placeholder:"пояснение",class:"grow"});
-  const myPays=PAYS.filter(p=>p.email===a.email);
+  const myPays=PAYS.filter(p=>p.username===a.username);
   return h("div",{},
-    h("div",{class:"grid"},card("Почта",a.email),card("Создан",fmtDate(a.created)),card("Последний вход",a.last_login?fmtAgo(a.last_login):"не входил"),card("Баланс",fmtMoneyC(a.balance_cents)),card("Telegram",a.telegram?"привязан":"нет",a.telegram?"ok":"muted")),
+    h("div",{class:"grid"},card("Логин",a.username||a.email),a.email?card("Почта",a.email):null,card("Google",a.google?"привязан":"нет",a.google?"ok":"muted"),card("Создан",fmtDate(a.created)),card("Последний вход",a.last_login?fmtAgo(a.last_login):"не входил"),card("Баланс",fmtMoneyC(a.balance_cents)),card("Telegram",a.telegram?"привязан":"нет",a.telegram?"ok":"muted")),
     a.blocked?h("div",{class:"box"},h("b",{class:"bad"},"Аккаунт на сайте заблокирован"),h("div",{class:"act"},h("button",{class:"b",onclick:()=>uCall("POST","/api/accounts/"+a.id+"/unblock",undefined,"Разблокирован")},"Разблокировать аккаунт"))):null,
     h("div",{class:"sec"},h("h3",{},"Заметка")),
     h("div",{class:"row"},note,h("button",{class:"b s",onclick:()=>uCall("POST","/api/accounts/"+a.id+"/note",{note:note.value},"Заметка сохранена")},"Сохранить")),
@@ -740,14 +740,14 @@ function dAccount(u,a){
     h("div",{class:"row"},dl,bn,h("button",{class:"b",onclick:()=>{ const v=Math.round(parseFloat(dl.value||"0")*100); if(!v) return toast("Введите сумму",true); uCall("POST","/api/accounts/"+a.id+"/balance",{delta_cents:v,note:bn.value},"Баланс изменён"); }},"Изменить")),
     h("div",{class:"hint"},"Положительная сумма пополняет, отрицательная списывает. Запись попадает в историю баланса, которую видит человек."),
     h("div",{class:"sec"},h("h3",{},"Пароль")),
-    NEWPW?h("div",{class:"box"},"Новый пароль для "+NEWPW.email+": ",h("b",{class:"mono"},NEWPW.password)," (показывается один раз) ",copyBtn(NEWPW.password)):null,
-    h("div",{class:"act"},h("button",{class:"b s",onclick:async()=>{ if(!confirm("Сбросить пароль для "+a.email+"? Человек выйдет со всех устройств.")) return; try{ NEWPW=await api("POST","/api/accounts/"+a.id+"/reset-password"); render(); }catch(e){ toast(e.message,true); } }},"Сбросить пароль"),
+    NEWPW?h("div",{class:"box"},"Новый пароль для "+(NEWPW.username||NEWPW.email)+": ",h("b",{class:"mono"},NEWPW.password)," (показывается один раз) ",copyBtn(NEWPW.password)):null,
+    h("div",{class:"act"},h("button",{class:"b s",onclick:async()=>{ if(!confirm("Сбросить пароль для "+(a.username||a.email)+"? Человек выйдет со всех устройств.")) return; try{ NEWPW=await api("POST","/api/accounts/"+a.id+"/reset-password"); render(); }catch(e){ toast(e.message,true); } }},"Сбросить пароль"),
       a.blocked?null:h("button",{class:"b d",onclick:()=>uCall("POST","/api/accounts/"+a.id+"/block",undefined,"Аккаунт заблокирован, ключ отключён")},"Заблокировать аккаунт")),
     h("div",{class:"sec"},h("h3",{},"Платежи")),
     myPays.length?h("div",{class:"tw"},h("table",{},h("tr",{},["№","Дата","Тариф","Сумма","Статус",""].map(t=>h("th",{},t))),myPays.map(payRow(false)))):h("div",{class:"hint"},"Платежей нет."));
 }
 function payRow(withAcc){
-  return p=>h("tr",{},h("td",{},p.id),h("td",{class:"muted"},fmtDate(Date.parse(p.created)/1000)),withAcc?h("td",{},p.email):null,
+  return p=>h("tr",{},h("td",{},p.id),h("td",{class:"muted"},fmtDate(Date.parse(p.created)/1000)),withAcc?h("td",{},p.username):null,
     h("td",{},(p.plan_name||"пополнение")+(p.days?" ("+p.days+" дн.)":"")),h("td",{},(p.amount_cents/100)+" "+p.currency),
     h("td",{},h("span",{class:p.status==="paid"?"ok":p.status==="pending"?"warn":"muted"},{paid:"оплачен",pending:"ждёт",canceled:"отменён"}[p.status]||p.status)),
     h("td",{},p.status==="pending"?h("div",{class:"row"},h("button",{class:"b",onclick:()=>uCall("POST","/api/payments/"+p.id+"/confirm",undefined,"Оплата подтверждена, срок продлён")},"Подтвердить"),
@@ -757,7 +757,7 @@ function payRow(withAcc){
 function uNewForm(){
   const kind=UNEW.kind;
   const name=h("input",{placeholder:"имя (латиница, цифры), например petr",maxlength:64});
-  const email=h("input",{type:"email",placeholder:"почта"}), pw=h("input",{placeholder:"пароль (пусто = сгенерировать)"}), days=h("input",{type:"number",value:(SET&&SET.values.site_trial_days)||30,min:0,style:"width:100px"});
+  const email=h("input",{placeholder:"логин: a-z, 0-9, _ (3-24)",maxlength:24}), pw=h("input",{placeholder:"пароль (пусто = сгенерировать)"}), days=h("input",{type:"number",value:(SET&&SET.values.site_trial_days)||30,min:0,style:"width:100px"});
   const ch=h("select",{style:"width:auto"},[["users","пользователей"],["admin","админов"]].map(([v,t])=>h("option",{value:v},t)));
   const create=async()=>{
     try{
@@ -766,8 +766,8 @@ function uNewForm(){
         if(ch.value==="admin") await api("POST","/api/users/"+encodeURIComponent(nm)+"/channel",{channel:"admin"});
         UNEW=null; USEL=nm; UVIEW="sum"; await refreshUsers("Создан. Ключ появится на серверах в течение 30 секунд"); return;
       }
-      const r=await api("POST","/api/accounts",{email:email.value,password:pw.value,days:parseInt(days.value||"0",10)});
-      NEWPW=r; UNEW=null; USEL=r.user||r.email; UVIEW="account"; await refreshUsers("Аккаунт создан");
+      const r=await api("POST","/api/accounts",{username:email.value.trim(),password:pw.value,days:parseInt(days.value||"0",10)});
+      NEWPW=r; UNEW=null; USEL=r.user||r.username; UVIEW="account"; await refreshUsers("Аккаунт создан");
     }catch(e){ toast(e.message,true); }
   };
   return h("div",{class:"detail"},h("div",{class:"dh"},h("div",{class:"row"},h("button",{class:"b s back",onclick:closeUser},"← К списку"),h("h2",{style:"flex:1"},"Новый пользователь"),h("button",{class:"b s",onclick:closeUser},"✕")),
@@ -775,8 +775,8 @@ function uNewForm(){
     h("div",{class:"db"},
       kind==="vpn"?h("div",{},h("div",{class:"hint"},"Человек без входа на сайт: вы выдаёте ему ссылку на подписку сами. Срок по умолчанию задаётся во вкладке «Тарифы»."),
         h("div",{class:"fld"},h("div",{class:"k"},"Имя"),name),h("div",{class:"fld"},h("div",{class:"k"},"Канал балансировщика"),ch))
-      :h("div",{},h("div",{class:"hint"},"Человек входит на сайт по почте и паролю, там видит подписку, срок, баланс, может платить. Сразу получает VPN-ключ."),
-        h("div",{class:"fld"},h("div",{class:"k"},"Почта"),email),h("div",{class:"fld"},h("div",{class:"k"},"Пароль"),pw),h("div",{class:"fld"},h("div",{class:"k"},"Дней доступа (0 — без срока)"),days)),
+      :h("div",{},h("div",{class:"hint"},"Человек входит на сайт по логину и паролю (или через Telegram и Google), там видит подписку, срок, баланс, может платить. Сразу получает VPN-ключ."),
+        h("div",{class:"fld"},h("div",{class:"k"},"Логин"),email),h("div",{class:"fld"},h("div",{class:"k"},"Пароль"),pw),h("div",{class:"fld"},h("div",{class:"k"},"Дней доступа (0 — без срока)"),days)),
       h("p",{},h("button",{class:"b",onclick:create},"Создать"))));
 }
 
@@ -1032,14 +1032,14 @@ function siteMain(){
   const S=SITE.settings, c=SITE.cert;
   const chk=(id,v)=>h("input",{type:"checkbox",id,checked:!!v});
   const inp=(id,v,ph)=>h("input",{id,value:v==null?"":v,placeholder:ph||"",class:"grow"});
-  const f={enabled:chk("f-en",S.site_enabled),domain:inp("f-dom",S.site_domain,"vpn.example.com"),email:inp("f-mail",S.site_email,"admin@example.com"),name:inp("f-name",S.site_name),
+  const f={gid:inp("f-gid",S.google_client_id,"123…apps.googleusercontent.com"),gsec:inp("f-gsec",S.google_client_secret,"GOCSPX-…"),enabled:chk("f-en",S.site_enabled),domain:inp("f-dom",S.site_domain,"vpn.example.com"),email:inp("f-mail",S.site_email,"admin@example.com"),name:inp("f-name",S.site_name),
     support:h("textarea",{style:"min-height:60px"},S.site_support||""),reg:chk("f-reg",S.site_registration),trial:h("input",{type:"number",min:0,max:365,value:S.site_trial_days,style:"width:90px"}),
     stg:chk("f-stg",S.site_acme_staging),via:chk("f-via",S.site_via_reality),
     theme:h("select",{style:"width:auto"},[["auto","как на устройстве"],["light","светлая"],["dark","тёмная"]].map(([v,t])=>h("option",{value:v,selected:v===(S.site_theme||"auto")},t))),
     pal:h("select",{style:"width:auto"},[["blue","синяя"],["green","зелёная"],["teal","бирюзовая"],["violet","фиолетовая"],["orange","оранжевая"],["rose","розовая"],["graphite","графит"],["custom","свой цвет"]].map(([v,t])=>h("option",{value:v,selected:v===(S.site_palette||"blue")},t))),
     accent:h("input",{type:"color",value:/^#[0-9a-fA-F]{6}$/.test(S.site_accent||"")?S.site_accent:"#2563eb",style:"width:60px;padding:2px"}),
     fimg:chk("f-fimg",S.forum_images),ffil:chk("f-ffil",S.forum_files)};
-  const saveSite=()=>save({site_enabled:f.enabled.checked,site_domain:f.domain.value.trim(),site_email:f.email.value.trim(),site_name:f.name.value.trim(),site_support:f.support.value.trim(),
+  const saveSite=()=>save({google_client_id:f.gid.value.trim(),google_client_secret:f.gsec.value.trim(),site_enabled:f.enabled.checked,site_domain:f.domain.value.trim(),site_email:f.email.value.trim(),site_name:f.name.value.trim(),site_support:f.support.value.trim(),
     site_registration:f.reg.checked,site_trial_days:parseInt(f.trial.value||"0",10),site_acme_staging:f.stg.checked,site_via_reality:f.via.checked,
     site_theme:f.theme.value,site_palette:f.pal.value,site_accent:f.pal.value==="custom"?f.accent.value:"",forum_images:f.fimg.checked,forum_files:f.ffil.checked}).then(()=>load());
   const certBox=()=>{
@@ -1065,6 +1065,11 @@ function siteMain(){
       h("div",{class:"row",style:"margin-top:8px"},f.via,h("label",{for:"f-via"},"Открывать сайт и на порту 443")),
       h("div",{class:"hint"},"Шлюз будет отдавать сайт браузерам на 443, а VPN-клиенты с ключом продолжат подключаться. Включается, только когда сертификат уже выпущен; ссылки получат домен вместо маскировки (клиентам нужно обновить подписку). Необязательно."),
       h("div",{class:"row",style:"margin-top:8px"},f.stg,h("label",{for:"f-stg"},"Тестовые сертификаты (для проверки, браузер им не доверяет)")),
+      h("p",{},h("button",{class:"b",onclick:saveSite},"Сохранить"))),
+    h("div",{class:"card"},h("h2",{},"Вход через Google и Telegram"),
+      h("div",{class:"hint"},"Вход по логину и паролю работает всегда. Кнопка «Войти через Telegram» появляется, когда задан токен бота (вкладка «Уведомления»). Кнопка Google — когда заданы оба поля ниже."),
+      h("div",{class:"k",style:"margin-top:8px"},"Google Client ID"),f.gid,h("div",{class:"k",style:"margin-top:8px"},"Google Client secret"),f.gsec,
+      h("div",{class:"hint"},"В Google Cloud Console создайте OAuth-клиент типа «Веб-приложение» и добавьте адрес перенаправления: "+(SITE.public_url||"https://ВАШ_ДОМЕН")+"/auth/google/callback"),
       h("p",{},h("button",{class:"b",onclick:saveSite},"Сохранить"))),
     h("div",{class:"card"},h("h2",{},"Оформление и форум"),
       h("div",{class:"row"},h("span",{class:"muted"},"Тема по умолчанию:"),f.theme,h("span",{class:"muted"},"Цвет:"),f.pal,f.accent),

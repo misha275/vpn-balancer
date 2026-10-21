@@ -52,7 +52,7 @@ func (a *API) siteGet(w http.ResponseWriter, r *http.Request) {
 	eff := a.cfg.Effective()
 	set := map[string]any{}
 	for k, v := range eff {
-		if strings.HasPrefix(k, "site_") || strings.HasPrefix(k, "forum_") {
+		if strings.HasPrefix(k, "site_") || strings.HasPrefix(k, "forum_") || strings.HasPrefix(k, "google_") {
 			set[k] = v
 		}
 	}
@@ -163,7 +163,8 @@ func (a *API) planDelete(w http.ResponseWriter, r *http.Request) {
 
 type accountView struct {
 	ID         int64  `json:"id"`
-	Email      string `json:"email"`
+	Username   string `json:"username"`
+	Email      string `json:"email,omitempty"`
 	User       string `json:"user"`
 	Blocked    bool   `json:"blocked"`
 	State      string `json:"state"`   // active | expired | unlimited | blocked
@@ -176,6 +177,7 @@ type accountView struct {
 	Note       string `json:"note"`
 	Balance    int64  `json:"balance_cents"`
 	Telegram   bool   `json:"telegram"`
+	Google     bool   `json:"google"`
 }
 
 func (a *API) accountsList(w http.ResponseWriter, r *http.Request) {
@@ -188,7 +190,7 @@ func (a *API) accountsList(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	out := make([]accountView, 0, len(accs))
 	for _, ac := range accs {
-		v := accountView{ID: ac.ID, Email: ac.Email, User: ac.UserName, Blocked: ac.Blocked, Created: ac.Created.Unix(), Note: ac.Note, Balance: ac.Balance, Telegram: ac.TgChat != nil}
+		v := accountView{ID: ac.ID, Username: ac.Username, Email: ac.Email, User: ac.UserName, Blocked: ac.Blocked, Created: ac.Created.Unix(), Note: ac.Note, Balance: ac.Balance, Telegram: ac.TgChat != nil, Google: ac.GoogleSub != ""}
 		v.State, v.DaysLeft = periodState(ac.Expires, now)
 		if ac.Blocked {
 			v.State = "blocked"
@@ -209,22 +211,22 @@ func (a *API) accountsList(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) accountCreate(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Email    string `json:"email"`
+		Username string `json:"username"`
 		Password string `json:"password"`
 		Days     int    `json:"days"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192)).Decode(&in); err != nil {
-		apiErr(w, 400, fmt.Errorf("ожидается JSON {email, password, days}"))
+		apiErr(w, 400, fmt.Errorf("ожидается JSON {username, password, days}"))
 		return
 	}
-	in.Email = normEmail(in.Email)
-	if len(in.Email) > 120 || !reEmail.MatchString(in.Email) {
-		apiErr(w, 400, fmt.Errorf("неверный адрес почты"))
+	in.Username = normUsername(in.Username)
+	if !validUsername(in.Username) {
+		apiErr(w, 400, fmt.Errorf("логин: 3–24 символа, маленькие латинские буквы, цифры и _"))
 		return
 	}
 	if in.Password == "" {
 		in.Password = randomPassword()
-	} else if msg := checkPassword(in.Password, in.Email); msg != "" {
+	} else if msg := checkPassword(in.Password, in.Username); msg != "" {
 		apiErr(w, 400, errors.New(msg))
 		return
 	}
@@ -237,15 +239,15 @@ func (a *API) accountCreate(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, 500, err)
 		return
 	}
-	if _, err := a.store.CreateAccountIn(r.Context(), in.Email, string(hash), in.Days, a.cfg.getSiteChannel()); err != nil {
+	if _, err := a.store.CreateAccountIn(r.Context(), in.Username, string(hash), in.Days, a.cfg.getSiteChannel()); err != nil {
 		code := 500
-		if errors.Is(err, ErrEmailTaken) {
+		if errors.Is(err, ErrNameTaken) {
 			code = 409
 		}
 		apiErr(w, code, err)
 		return
 	}
-	writeJSON(w, 200, map[string]string{"email": in.Email, "password": in.Password}) // the only time the password is shown
+	writeJSON(w, 200, map[string]string{"username": in.Username, "user": in.Username, "password": in.Password}) // the only time the password is shown
 }
 
 // expiryReq is a change of the subscription period: add days, set a date, or remove the limit.
@@ -329,7 +331,7 @@ func (a *API) accountOp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.store.DeleteOtherSessions(r.Context(), id, "") // every session ends
-		writeJSON(w, 200, map[string]string{"email": acc.Email, "password": pw})
+		writeJSON(w, 200, map[string]string{"username": acc.Username, "password": pw})
 		return
 	case "expiry":
 		var e expiryReq

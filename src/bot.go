@@ -45,26 +45,45 @@ func NewBot(cfg *Config, st *Store) *Bot {
 	return &Bot{cfg: cfg, st: st, client: &http.Client{Timeout: 40 * time.Second}, lim: newLimiter(40, time.Minute)}
 }
 
+// tgFrom is the sender of a message; its name goes to the new account when somebody signs in through the bot.
+type tgFrom struct {
+	Username  string `json:"username"`
+	FirstName string `json:"first_name"`
+}
+
+func (f *tgFrom) name() string {
+	if f == nil {
+		return ""
+	}
+	if f.Username != "" {
+		return f.Username
+	}
+	return f.FirstName
+}
+
+type tgChat struct {
+	ID   int64  `json:"id"`
+	Type string `json:"type"`
+}
+
+type tgMessage struct {
+	ID   int64   `json:"message_id"`
+	Text string  `json:"text"`
+	From *tgFrom `json:"from"`
+	Chat tgChat  `json:"chat"`
+}
+
+type tgCallback struct {
+	ID      string     `json:"id"`
+	Data    string     `json:"data"`
+	From    *tgFrom    `json:"from"`
+	Message *tgMessage `json:"message"`
+}
+
 type tgUpdate struct {
-	ID      int64 `json:"update_id"`
-	Message *struct {
-		Text string `json:"text"`
-		Chat struct {
-			ID   int64  `json:"id"`
-			Type string `json:"type"`
-		} `json:"chat"`
-	} `json:"message"`
-	Callback *struct {
-		ID      string `json:"id"`
-		Data    string `json:"data"`
-		Message *struct {
-			ID   int64 `json:"message_id"`
-			Chat struct {
-				ID   int64  `json:"id"`
-				Type string `json:"type"`
-			} `json:"chat"`
-		} `json:"message"`
-	} `json:"callback_query"`
+	ID       int64       `json:"update_id"`
+	Message  *tgMessage  `json:"message"`
+	Callback *tgCallback `json:"callback_query"`
 }
 
 func (b *Bot) call(ctx context.Context, method string, in, out any) error {
@@ -220,7 +239,7 @@ func (b *Bot) Run(ctx context.Context) {
 				_ = b.call(hc, "answerCallbackQuery", map[string]any{"callback_query_id": u.Callback.ID}, nil)
 				if !b.lim.blocked(key) {
 					b.lim.hit(key)
-					b.edit(hc, chat, u.Callback.Message.ID, b.Callback(hc, chat, u.Callback.Data))
+					b.edit(hc, chat, u.Callback.Message.ID, b.CallbackAs(hc, chat, u.Callback.Data, u.Callback.From.name()))
 				}
 				hcancel()
 			case u.Message != nil && u.Message.Chat.Type == "private" && u.Message.Text != "":
@@ -290,7 +309,7 @@ func (b *Bot) Handle(ctx context.Context, chat int64, text string) string {
 			if err != nil {
 				return "Код не подошёл или устарел (он действует 15 минут). Получите новый в кабинете на сайте."
 			}
-			return "Готово, аккаунт " + a.Email + " привязан.\n\n" + botHelp
+			return "Готово, аккаунт " + a.Username + " привязан.\n\n" + botHelp
 		case "/help":
 			return "Это бот сервиса. Привяжите аккаунт: получите код в кабинете на сайте и отправьте /start КОД"
 		}

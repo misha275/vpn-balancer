@@ -82,12 +82,12 @@ func runCLIService(ctx context.Context, cfg *Config, st *Store, cmd string, args
 			if ac.Expires != nil {
 				exp = ac.Expires.Format("2006-01-02") + fmt.Sprintf(" (%d дн.)", left)
 			}
-			fmt.Printf("%-32s %-10s %-24s баланс %s  пользователь %s\n", ac.Email, state, exp, cents(ac.Balance), ac.UserName)
+			fmt.Printf("%-32s %-10s %-24s баланс %s  пользователь %s\n", ac.Username, state, exp, cents(ac.Balance), ac.UserName)
 		}
 		fmt.Printf("всего: %d\n", len(accs))
 	case "balance":
 		if len(args) < 2 {
-			return true, fmt.Errorf("usage: balance ПОЧТА ±СУММА [пояснение]")
+			return true, fmt.Errorf("usage: balance ЛОГИН ±СУММА [пояснение]")
 		}
 		amount, err := strconv.ParseFloat(strings.ReplaceAll(args[1], ",", "."), 64)
 		if err != nil {
@@ -98,7 +98,7 @@ func runCLIService(ctx context.Context, cfg *Config, st *Store, cmd string, args
 			return true, err
 		}
 		for _, ac := range accs {
-			if strings.EqualFold(ac.Email, args[0]) {
+			if strings.EqualFold(ac.Username, args[0]) {
 				_, err := cliCall(ctx, cfg, st, "POST", fmt.Sprintf("/api/accounts/%d/balance", ac.ID), map[string]any{"delta_cents": int64(amount * 100), "note": strings.Join(args[2:], " ")})
 				if err == nil {
 					fmt.Println("готово")

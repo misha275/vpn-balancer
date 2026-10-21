@@ -14,22 +14,22 @@ const siteTplText = `
 <meta name="robots" content="noindex"><title>{{.Title}} · {{.Site}}</title><link rel="stylesheet" href="/site.css?v={{.CSSVer}}"></head><body>
 <header><div class="bar"><a class="name" href="/">{{.Site}}</a>
 <a href="/help">Инструкции</a>
-{{if .Email}}<a href="/cabinet">Кабинет</a><a href="/forum">Форум</a>{{else}}<a href="/login">Войти</a>{{end}}
+{{if .Login}}<a href="/cabinet">Кабинет</a><a href="/forum">Форум</a>{{else}}<a href="/login">Войти</a>{{end}}
 {{template "prefs" .}}
-{{if .Email}}<form method="post" action="/logout" style="margin:0"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn s sm">Выйти</button></form>
+{{if .Login}}<form method="post" action="/logout" style="margin:0"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn s sm">Выйти</button></form>
 {{else if .CanRegister}}<a class="btn sm" href="/register">Регистрация</a>{{end}}</div></header><main>{{end}}
 {{define "prefs"}}<details class="prefs"><summary title="Оформление">🎨</summary><div class="pop">
 <div class="lbl">Тема</div><div class="opts">{{range .ThemeOpts}}<a{{if .On}} class="on"{{end}} href="/prefs?theme={{.ID}}&back={{$.Path}}" rel="nofollow">{{.Icon}} {{.Title}}</a>{{end}}</div>
 <div class="lbl">Цвет</div><div class="opts">{{range .PaletteOpts}}<a{{if .On}} class="on"{{end}} href="/prefs?palette={{.ID}}&back={{$.Path}}" rel="nofollow"><span class="dot" style="background:{{.Color}}"></span>{{.Title}}</a>{{end}}</div>
 <div class="lbl"><a href="/prefs?reset=1&back={{.Path}}" rel="nofollow">Вернуть как задумано</a></div></div></details>{{end}}
-{{define "foot"}}</main><footer>{{if .Support}}<span>{{.Support}}</span>{{end}}<a href="/help">Инструкции</a>{{if .Email}}<a href="/forum">Форум</a>{{end}}</footer>
+{{define "foot"}}</main><footer>{{if .Support}}<span>{{.Support}}</span>{{end}}<a href="/help">Инструкции</a>{{if .Login}}<a href="/forum">Форум</a>{{end}}</footer>
 <script nonce="{{.Nonce}}">document.addEventListener("click",function(e){var b=e.target.closest("[data-copy]");if(!b)return;var t=document.getElementById(b.dataset.copy).value;
 (navigator.clipboard?navigator.clipboard.writeText(t):Promise.reject()).then(function(){b.textContent="Скопировано"},function(){var i=document.getElementById(b.dataset.copy);i.select();document.execCommand&&document.execCommand("copy");b.textContent="Скопировано"});});</script>
 </body></html>{{end}}
 
 {{define "home"}}{{template "head" .}}
 <div class="hero"><h1>{{.Site}}</h1><p>Быстрый и стабильный VPN. Зарегистрируйтесь, получите ссылку на подписку и подключите её в приложении за минуту.</p>
-{{if .Email}}<a class="btn" href="/cabinet">Открыть кабинет</a>{{else}}{{if .CanRegister}}<a class="btn" href="/register">Зарегистрироваться{{if .Trial}} (бесплатно {{.Trial}}){{end}}</a> {{end}}<a class="btn s" href="/login">Войти</a>{{end}}
+{{if .Login}}<a class="btn" href="/cabinet">Открыть кабинет</a>{{else}}{{if .CanRegister}}<a class="btn" href="/register">Зарегистрироваться{{if .Trial}} (бесплатно {{.Trial}}){{end}}</a> {{end}}<a class="btn s" href="/login">Войти</a>{{end}}
 <a class="btn s" href="/help">Как подключиться</a></div>
 <div class="feat"><div><b>Сам выбирает лучший сервер</b><span class="muted">Балансировщик следит за узлами и переключается, если один из них упал.</span></div>
 <div><b>Подключение за минуту</b><span class="muted">Одна ссылка-подписка для всех ваших устройств, QR-код для телефона.</span></div>
@@ -37,12 +37,26 @@ const siteTplText = `
 {{if .Plans}}<h2>Тарифы</h2><div class="grid">{{range .Plans}}<div class="card plan"><div>{{.Name}}</div><div class="price">{{.Price}}</div><div class="muted">{{.Days}} дн.</div>{{if .Has}}<div class="muted" style="font-size:13px;margin-top:6px">{{range $i, $h := .Has}}{{if $i}}, {{end}}{{$h}}{{end}}</div>{{end}}</div>{{end}}</div>{{end}}
 {{template "foot" .}}{{end}}
 
+{{define "oauth"}}{{if or .Google .Telegram}}<div class="muted" style="text-align:center;margin:14px 0 8px">или</div>
+{{if .Telegram}}<form method="post" action="/auth/telegram">{{if .Svc.Ref}}<input type="hidden" name="ref" value="{{.Svc.Ref}}">{{end}}<button class="btn s" style="width:100%">Войти через Telegram</button></form>{{end}}
+{{if .Google}}<p style="margin:8px 0 0"><a class="btn s" style="display:block;text-align:center" href="/auth/google{{if .Svc.Ref}}?ref={{.Svc.Ref}}{{end}}">Войти через Google</a></p>{{end}}{{end}}{{end}}
+
+{{define "tglogin"}}{{template "head" .}}
+<div class="card" style="max-width:420px;margin:0 auto"><h1>Вход через Telegram</h1>
+{{if .Error}}<div class="err">{{.Error}}</div>{{end}}
+<meta http-equiv="refresh" content="4;url=/auth/telegram/check">
+<p>1. Нажмите кнопку и откройте бота в Telegram.<br>2. В боте нажмите «Да, это я».<br>3. Вернитесь сюда: страница обновится сама.</p>
+<p><a class="btn" href="{{.TgLink}}" target="_blank" rel="noopener">Открыть Telegram</a></p>
+<p class="muted">Ждём подтверждения… Ссылка действует 10 минут. <a href="/auth/telegram/check">Проверить сейчас</a> · <a href="/login">Отмена</a></p></div>
+{{template "foot" .}}{{end}}
+
 {{define "login"}}{{template "head" .}}
 <div class="card" style="max-width:420px;margin:0 auto"><h1>Вход</h1>
 {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
-<form method="post" action="/login"><label for="email">Почта</label><input id="email" type="email" name="email" value="{{.FormEmail}}" required autocomplete="username" maxlength="120">
+<form method="post" action="/login"><label for="username">Логин</label><input id="username" name="username" value="{{.FormUser}}" required autocomplete="username" maxlength="24" autocapitalize="none" spellcheck="false">
 <label for="pw">Пароль</label><input id="pw" type="password" name="password" required autocomplete="current-password" maxlength="72">
 <p><button class="btn">Войти</button></p></form>
+{{template "oauth" .}}
 {{if .CanRegister}}<p class="muted">Нет аккаунта? <a href="/register">Регистрация</a></p>{{end}}</div>
 {{template "foot" .}}{{end}}
 
@@ -50,11 +64,12 @@ const siteTplText = `
 <div class="card" style="max-width:420px;margin:0 auto"><h1>Регистрация</h1>
 {{if .Trial}}<p class="muted">После регистрации {{.Trial}} бесплатно.</p>{{end}}
 {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
-<form method="post" action="/register"><label for="email">Почта</label><input id="email" type="email" name="email" value="{{.FormEmail}}" required autocomplete="username" maxlength="120">
+<form method="post" action="/register"><label for="username">Логин (3–24 символа: a–z, 0–9, _)</label><input id="username" name="username" value="{{.FormUser}}" required autocomplete="username" maxlength="24" minlength="3" pattern="[a-zA-Z0-9_]{3,24}" autocapitalize="none" spellcheck="false">
 <label for="pw">Пароль (от 8 символов)</label><input id="pw" type="password" name="password" required minlength="8" maxlength="72" autocomplete="new-password">
 <label for="pw2">Пароль ещё раз</label><input id="pw2" type="password" name="password2" required minlength="8" maxlength="72" autocomplete="new-password">
 {{if .Svc.Ref}}<input type="hidden" name="ref" value="{{.Svc.Ref}}"><p class="muted">Вы пришли по приглашению друга.</p>{{end}}
 <p><button class="btn">Создать аккаунт</button></p></form>
+{{template "oauth" .}}
 <p class="muted">Уже есть аккаунт? <a href="/login">Войти</a></p></div>
 {{template "foot" .}}{{end}}
 
@@ -71,7 +86,7 @@ const siteTplText = `
 {{if ne .Payment "off"}}<p><a class="btn sm" href="/pay">{{if eq .State "active"}}Продлить{{else}}Оплатить{{end}}</a></p>{{else if .Support}}<p class="muted">Чтобы продлить, свяжитесь с поддержкой.</p>{{end}}</div>
 <div class="card"><div class="muted">Использовано трафика</div><div class="big">{{.TrafficAll}}</div>
 <div class="muted">за 30 дней: {{.Traffic30}}</div><div class="muted">↑ {{.UpAll}} · ↓ {{.DownAll}}</div></div>
-<div class="card"><div class="muted">Аккаунт № {{.UserNo}}</div><div class="big" style="font-size:17px;word-break:break-all">{{.Nick}}</div><div class="muted">{{.Email}} · создан {{.Created}}</div></div>
+<div class="card"><div class="muted">Аккаунт № {{.UserNo}}</div><div class="big" style="font-size:17px;word-break:break-all">{{.Nick}}</div><div class="muted">{{.Login}} · создан {{.Created}}</div></div>
 </div>
 
 <div class="card"><h2>Подключение</h2>
@@ -107,8 +122,8 @@ const siteTplText = `
 <label for="nick">Как вас называть (виден в названии подписки в приложении)</label><input id="nick" name="nick" value="{{.Nick}}" required maxlength="32">
 <p><button class="btn s">Сохранить ник</button></p></form></div>
 
-<div class="card"><h2>Смена пароля</h2><form method="post" action="/account/password"><input type="hidden" name="csrf" value="{{.CSRF}}">
-<label for="old">Текущий пароль</label><input id="old" type="password" name="old" required autocomplete="current-password" maxlength="72">
+<div class="card"><h2>{{if .HasPass}}Смена пароля{{else}}Пароль{{end}}</h2><form method="post" action="/account/password"><input type="hidden" name="csrf" value="{{.CSRF}}">
+{{if .HasPass}}<label for="old">Текущий пароль</label><input id="old" type="password" name="old" required autocomplete="current-password" maxlength="72">{{else}}<p class="muted">Вы вошли без пароля (через Telegram или Google). Задайте пароль, чтобы входить и по логину <b>{{.Login}}</b>.</p>{{end}}
 <label for="new">Новый пароль (от 8 символов)</label><input id="new" type="password" name="new" required minlength="8" maxlength="72" autocomplete="new-password">
 <p><button class="btn s">Сменить пароль</button></p></form></div>
 {{template "foot" .}}{{end}}

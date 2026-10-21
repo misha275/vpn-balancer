@@ -353,3 +353,31 @@ CREATE TABLE IF NOT EXISTS tg_links (
     account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
     created    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- sign-in by login + password, Telegram or Google (instead of the e-mail): the login name of an account, its Google identity;
+-- the e-mail becomes optional (kept for old accounts and filled from Google)
+ALTER TABLE accounts ALTER COLUMN email DROP NOT NULL;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS username TEXT;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS google_sub TEXT;
+UPDATE accounts a SET username = b.u FROM (
+    SELECT id, base || CASE WHEN rn > 1 THEN rn::text ELSE '' END AS u FROM (
+        SELECT id, left(CASE WHEN length(x) < 3 THEN x || '_user' ELSE x END, 24) AS base,
+               row_number() OVER (PARTITION BY x ORDER BY id) AS rn
+        FROM (SELECT id, regexp_replace(lower(split_part(email, '@', 1)), '[^a-z0-9_]', '_', 'g') AS x FROM accounts WHERE username IS NULL) t
+    ) t2
+) b WHERE a.id = b.id AND a.username IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS accounts_username ON accounts (lower(username));
+CREATE UNIQUE INDEX IF NOT EXISTS accounts_google ON accounts (google_sub) WHERE google_sub IS NOT NULL;
+
+-- requests to sign in through the bot of Telegram: the browser holds a secret, the person confirms in the bot
+CREATE TABLE IF NOT EXISTS tg_logins (
+    token_hash  TEXT PRIMARY KEY,
+    secret_hash TEXT NOT NULL UNIQUE,
+    ip          TEXT NOT NULL DEFAULT '',
+    agent       TEXT NOT NULL DEFAULT '',
+    ref         TEXT NOT NULL DEFAULT '',
+    state       TEXT NOT NULL DEFAULT 'wait',
+    tg_chat     BIGINT,
+    tg_name     TEXT NOT NULL DEFAULT '',
+    created     TIMESTAMPTZ NOT NULL DEFAULT now()
+);

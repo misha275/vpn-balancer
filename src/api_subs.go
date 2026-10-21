@@ -291,7 +291,7 @@ type userStatsView struct {
 	*UserStats
 	Enabled    bool          `json:"enabled"`
 	Expires    int64         `json:"expires"`
-	Email      string        `json:"email,omitempty"`
+	Account    string        `json:"account,omitempty"`
 	Online     bool          `json:"online"`
 	Sessions   []SessInfo    `json:"sessions"`
 	SpeedUp    int64         `json:"speed_up"`
@@ -346,7 +346,7 @@ func (a *API) userStats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if acc, err := a.store.AccountByUserID(r.Context(), u.ID); err == nil {
-		v.Email = acc.Email
+		v.Account = acc.Username
 	}
 	if a.stats != nil {
 		sess, e, sp := a.stats.LiveOf(name)

@@ -67,7 +67,7 @@ func TestBackupRoundTrip(t *testing.T) {
 	st := testStore(t)
 	ctx := context.Background()
 	cfg := &Config{BackupDir: t.TempDir(), BackupKeep: 2, BackupPassword: "pw"}
-	acc, err := st.CreateAccount(ctx, "bk@example.com", "hash", 5)
+	acc, err := st.CreateAccount(ctx, "bkp", "hash", 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestBackupRoundTrip(t *testing.T) {
 		t.Fatalf("bad info %+v", info)
 	}
 	raw, _ := ReadBackupFile(cfg, info.Name)
-	if strings.Contains(string(raw), "bk@example.com") {
+	if strings.Contains(string(raw), "bkp") {
 		t.Fatal("encrypted backup leaks the e-mail")
 	}
 
@@ -123,7 +123,7 @@ func TestBackupRoundTrip(t *testing.T) {
 	if u, ok := names["bk-plain"]; !ok || u.BlockKind != "ban" || u.BlockReason != "тест" {
 		t.Errorf("bk-plain not restored with its block: %+v", u)
 	}
-	if _, ok := names["bk@example.com"]; !ok {
+	if _, ok := names["bkp"]; !ok {
 		t.Error("account user missing")
 	}
 	var v string
@@ -182,14 +182,14 @@ func TestBackupRotation(t *testing.T) {
 func TestBlockUser(t *testing.T) {
 	st := testStore(t)
 	ctx := context.Background()
-	acc, err := st.CreateAccount(ctx, "blk@example.com", "h", 5)
+	acc, err := st.CreateAccount(ctx, "blk", "h", 5)
 	if err != nil {
 		t.Fatal(err)
 	}
 	has := func() bool {
 		us, _ := st.EnabledUsers(ctx)
 		for _, u := range us {
-			if u.Name == "blk@example.com" {
+			if u.Name == "blk" {
 				return true
 			}
 		}
@@ -202,16 +202,16 @@ func TestBlockUser(t *testing.T) {
 	if u0 == nil {
 		t.Fatal("no user by token")
 	}
-	if err := st.BlockUser(ctx, "blk@example.com", "bogus", ""); err == nil {
+	if err := st.BlockUser(ctx, "blk", "bogus", ""); err == nil {
 		t.Error("bad kind accepted")
 	}
 	if err := st.BlockUser(ctx, "nobody", "ban", ""); err == nil {
 		t.Error("unknown user accepted")
 	}
-	if err := st.BlockUser(ctx, "blk@example.com", "unpaid", strings.Repeat("я", 301)); err == nil {
+	if err := st.BlockUser(ctx, "blk", "unpaid", strings.Repeat("я", 301)); err == nil {
 		t.Error("too long reason accepted")
 	}
-	if err := st.BlockUser(ctx, "blk@example.com", "unpaid", strings.Repeat("я", 300)); err != nil {
+	if err := st.BlockUser(ctx, "blk", "unpaid", strings.Repeat("я", 300)); err != nil {
 		t.Fatal(err)
 	}
 	if has() {
@@ -222,7 +222,7 @@ func TestBlockUser(t *testing.T) {
 	}
 	us, _ := st.ListUsers(ctx)
 	for _, u := range us {
-		if u.Name == "blk@example.com" {
+		if u.Name == "blk" {
 			if u.BlockKind != "unpaid" || len([]rune(u.BlockReason)) != 300 || u.BlockedAt == nil || u.Active(time.Now()) {
 				t.Errorf("bad block state %+v", u)
 			}
@@ -241,7 +241,7 @@ func TestBlockUser(t *testing.T) {
 		t.Error("payment did not lift the unpaid block")
 	}
 	// a ban is not lifted by a payment and closes the login
-	if err := st.BlockUser(ctx, "blk@example.com", "ban", "спам"); err != nil {
+	if err := st.BlockUser(ctx, "blk", "ban", "спам"); err != nil {
 		t.Fatal(err)
 	}
 	p2, _ := st.CreatePayment(ctx, acc.ID, pl, "manual")
@@ -258,7 +258,7 @@ func TestBlockUser(t *testing.T) {
 	if !blocked {
 		t.Error("ban must close the site login")
 	}
-	if err := st.UnblockUser(ctx, "blk@example.com"); err != nil {
+	if err := st.UnblockUser(ctx, "blk"); err != nil {
 		t.Fatal(err)
 	}
 	if !has() {
@@ -269,7 +269,7 @@ func TestBlockUser(t *testing.T) {
 func TestForumStore(t *testing.T) {
 	st := testStore(t)
 	ctx := context.Background()
-	acc, err := st.CreateAccount(ctx, "fr@example.com", "h", 5)
+	acc, err := st.CreateAccount(ctx, "frn", "h", 5)
 	if err != nil {
 		t.Fatal(err)
 	}

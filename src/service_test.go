@@ -33,9 +33,9 @@ func svcPlan(t *testing.T, st *Store, name string, price int) Plan {
 	return *p
 }
 
-func accountByEmail(t *testing.T, st *Store, email string) *Account {
+func accountByName(t *testing.T, st *Store, email string) *Account {
 	t.Helper()
-	a, err := st.AccountByEmail(context.Background(), email)
+	a, err := st.AccountByUsername(context.Background(), email)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,8 +52,8 @@ func TestReferralRewardsAndBalance(t *testing.T) {
 	cfg.RefBonusDays, cfg.RefBonusPercent, cfg.RefInviteeDays = &days, pct, inv
 
 	a := newSiteClient(t, srv)
-	a.register("inviter@example.com", "password1")
-	acc := accountByEmail(t, st, "inviter@example.com")
+	a.register("inviter", "password1")
+	acc := accountByName(t, st, "inviter")
 	_, body, _ := a.get("/cabinet")
 	code, _ := st.EnsureRefCode(ctx, acc.ID)
 	if !strings.Contains(body, "/r/"+code) || !strings.Contains(body, "10 дней") || !strings.Contains(body, "20%") {
@@ -69,8 +69,8 @@ func TestReferralRewardsAndBalance(t *testing.T) {
 	if !strings.Contains(reg, `name="ref" value="`+code+`"`) {
 		t.Fatal("the registration form carries the code")
 	}
-	b.post("/register", url.Values{"email": {"friend@example.com"}, "password": {"password1"}, "password2": {"password1"}, "ref": {code}}, true)
-	friend := accountByEmail(t, st, "friend@example.com")
+	b.post("/register", url.Values{"username": {"friend"}, "password": {"password1"}, "password2": {"password1"}, "ref": {code}}, true)
+	friend := accountByName(t, st, "friend")
 	if friend.ReferredBy == nil || *friend.ReferredBy != acc.ID {
 		t.Fatalf("referrer: %v", friend.ReferredBy)
 	}
@@ -82,27 +82,27 @@ func TestReferralRewardsAndBalance(t *testing.T) {
 		t.Error("unknown code")
 	}
 
-	before := accountByEmail(t, st, "inviter@example.com")
+	before := accountByName(t, st, "inviter")
 	fBefore := friend
 	code2, body2, _ := b.post("/pay", url.Values{"plan": {fmt.Sprint(plan.ID)}, "csrf": {b.csrf()}}, true)
 	if code2 != 200 || !strings.Contains(body2, "Оплачено") {
 		t.Fatalf("test payment: %d", code2)
 	}
-	after := accountByEmail(t, st, "inviter@example.com")
+	after := accountByName(t, st, "inviter")
 	if d := after.Expires.Sub(*before.Expires); d < 9*24*time.Hour+23*time.Hour || d > 10*24*time.Hour+time.Hour {
 		t.Errorf("the inviter gets 10 days: %v", d)
 	}
 	if after.Balance != 6000 {
 		t.Errorf("20%% of 300 on the balance: %d", after.Balance)
 	}
-	fAfter := accountByEmail(t, st, "friend@example.com")
+	fAfter := accountByName(t, st, "friend")
 	// 3 trial days + 30 paid + 5 gift
 	if d := fAfter.Expires.Sub(*fBefore.Expires); d < 34*24*time.Hour || d > 36*24*time.Hour {
 		t.Errorf("the friend: 30 paid + 5 gift days: %v", d)
 	}
 	// the second payment of the friend rewards nobody
 	b.post("/pay", url.Values{"plan": {fmt.Sprint(plan.ID)}, "csrf": {b.csrf()}}, true)
-	if again := accountByEmail(t, st, "inviter@example.com"); again.Balance != 6000 || !again.Expires.Equal(*after.Expires) {
+	if again := accountByName(t, st, "inviter"); again.Balance != 6000 || !again.Expires.Equal(*after.Expires) {
 		t.Errorf("the reward is paid once: %d %v", again.Balance, again.Expires)
 	}
 	rs, _ := st.RefStatsOf(ctx, acc.ID)
@@ -118,15 +118,15 @@ func TestReferralRewardsAndBalance(t *testing.T) {
 	if c, _, _ := a.post("/pay/topup", url.Values{"amount": {"250,50"}, "csrf": {a.csrf()}}, true); c != 200 {
 		t.Fatalf("topup: %d", c)
 	}
-	if bal := accountByEmail(t, st, "inviter@example.com").Balance; bal != 6000+25050 {
+	if bal := accountByName(t, st, "inviter").Balance; bal != 6000+25050 {
 		t.Errorf("balance after the top-up: %d", bal)
 	}
-	exp := accountByEmail(t, st, "inviter@example.com").Expires
+	exp := accountByName(t, st, "inviter").Expires
 	code3, body3, _ = a.post("/pay", url.Values{"plan": {fmt.Sprint(plan.ID)}, "use_balance": {"1"}, "csrf": {a.csrf()}}, true)
 	if code3 != 200 || !strings.Contains(body3, "Оплачено с баланса") {
 		t.Fatalf("pay from balance: %d %.200s", code3, body3)
 	}
-	end := accountByEmail(t, st, "inviter@example.com")
+	end := accountByName(t, st, "inviter")
 	if end.Balance != 1050 || end.Expires.Sub(*exp) < 29*24*time.Hour {
 		t.Errorf("after: %d %v", end.Balance, end.Expires)
 	}
@@ -170,8 +170,8 @@ func TestPromoCodes(t *testing.T) {
 		}
 	}
 	a := newSiteClient(t, srv)
-	a.register("promo@example.com", "password1")
-	acc := accountByEmail(t, st, "promo@example.com")
+	a.register("promo", "password1")
+	acc := accountByName(t, st, "promo")
 	cab := func(code string) (int, string) {
 		c, b, _ := a.post("/account/promo", url.Values{"promo": {code}, "csrf": {a.csrf()}}, true)
 		return c, b
@@ -180,7 +180,7 @@ func TestPromoCodes(t *testing.T) {
 	if c, b := cab("week"); c != 200 || !strings.Contains(b, "Промокод применён") {
 		t.Fatalf("days code: %d", c)
 	}
-	if got := accountByEmail(t, st, "promo@example.com").Expires; got.Sub(*before) < 6*24*time.Hour+23*time.Hour {
+	if got := accountByName(t, st, "promo").Expires; got.Sub(*before) < 6*24*time.Hour+23*time.Hour {
 		t.Errorf("+7 days: %v", got.Sub(*before))
 	}
 	if c, b := cab("WEEK"); c != 400 || !strings.Contains(b, "уже использовали") {
@@ -189,11 +189,11 @@ func TestPromoCodes(t *testing.T) {
 	if c, _ := cab("GIFT"); c != 200 {
 		t.Errorf("balance code: %d", c)
 	}
-	if got := accountByEmail(t, st, "promo@example.com").Balance; got != 5000 {
+	if got := accountByName(t, st, "promo").Balance; got != 5000 {
 		t.Errorf("balance: %d", got)
 	}
 	b := newSiteClient(t, srv)
-	b.register("promo2@example.com", "password1")
+	b.register("promo2", "password1")
 	if c, _, _ := b.post("/account/promo", url.Values{"promo": {"GIFT"}, "csrf": {b.csrf()}}, true); c != 400 {
 		t.Errorf("the limit of uses: %d", c)
 	}
@@ -235,8 +235,8 @@ func TestPaymentWebhook(t *testing.T) {
 	ctx := context.Background()
 	plan := svcPlan(t, st, "Месяц", 10000)
 	a := newSiteClient(t, srv)
-	a.register("hook@example.com", "password1")
-	acc := accountByEmail(t, st, "hook@example.com")
+	a.register("hook", "password1")
+	acc := accountByName(t, st, "hook")
 	pay, err := st.CreatePayment(ctx, acc.ID, plan, "stub")
 	if err != nil {
 		t.Fatal(err)
@@ -273,14 +273,14 @@ func TestPaymentWebhook(t *testing.T) {
 	if c := send("stub", map[string]any{"payment_id": pay.ID, "status": "paid", "amount_cents": 5}, "topsecret", true); c != 409 {
 		t.Errorf("amount differs: %d", c)
 	}
-	exp := accountByEmail(t, st, "hook@example.com").Expires
+	exp := accountByName(t, st, "hook").Expires
 	if c := send("stub", body, "topsecret", true); c != 200 {
 		t.Fatalf("paid: %d", c)
 	}
 	if send("stub", body, "topsecret", true) != 200 {
 		t.Error("repeating is harmless")
 	}
-	if got := accountByEmail(t, st, "hook@example.com").Expires; got.Sub(*exp) < 29*24*time.Hour || got.Sub(*exp) > 31*24*time.Hour {
+	if got := accountByName(t, st, "hook").Expires; got.Sub(*exp) < 29*24*time.Hour || got.Sub(*exp) > 31*24*time.Hour {
 		t.Errorf("extended once: %v", got.Sub(*exp))
 	}
 	if p, _ := st.PaymentByID(ctx, pay.ID); p.Status != "paid" {
@@ -296,7 +296,7 @@ func TestPaymentWebhook(t *testing.T) {
 	// a top-up confirmed by the callback goes to the balance
 	tp, _ := st.CreateTopup(ctx, acc.ID, 7000, "RUB", "stub")
 	send("stub", map[string]any{"payment_id": tp.ID, "status": "paid"}, "topsecret", true)
-	if got := accountByEmail(t, st, "hook@example.com").Balance; got != 7000 {
+	if got := accountByName(t, st, "hook").Balance; got != 7000 {
 		t.Errorf("top-up: %d", got)
 	}
 }
@@ -353,13 +353,7 @@ func (f *fakeTG) say(chat int64, text string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	u := tgUpdate{ID: int64(len(f.sent)+len(f.updates)) + 100}
-	u.Message = &struct {
-		Text string `json:"text"`
-		Chat struct {
-			ID   int64  `json:"id"`
-			Type string `json:"type"`
-		} `json:"chat"`
-	}{Text: text}
+	u.Message = &tgMessage{Text: text}
 	u.Message.Chat.ID, u.Message.Chat.Type = chat, "private"
 	f.updates = append(f.updates, u)
 }
@@ -369,24 +363,7 @@ func (f *fakeTG) press(chat int64, data string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	u := tgUpdate{ID: int64(len(f.sent)+len(f.updates)) + 100}
-	u.Callback = &struct {
-		ID      string `json:"id"`
-		Data    string `json:"data"`
-		Message *struct {
-			ID   int64 `json:"message_id"`
-			Chat struct {
-				ID   int64  `json:"id"`
-				Type string `json:"type"`
-			} `json:"chat"`
-		} `json:"message"`
-	}{ID: "cb1", Data: data}
-	u.Callback.Message = &struct {
-		ID   int64 `json:"message_id"`
-		Chat struct {
-			ID   int64  `json:"id"`
-			Type string `json:"type"`
-		} `json:"chat"`
-	}{ID: 5}
+	u.Callback = &tgCallback{ID: "cb1", Data: data, Message: &tgMessage{ID: 5}}
 	u.Callback.Message.Chat.ID, u.Callback.Message.Chat.Type = chat, "private"
 	f.updates = append(f.updates, u)
 }
@@ -431,8 +408,8 @@ func TestTelegramBot(t *testing.T) {
 	defer func() { botPoll = 25 }()
 
 	a := newSiteClient(t, srv)
-	a.register("tg@example.com", "password1")
-	acc := accountByEmail(t, st, "tg@example.com")
+	a.register("tguser", "password1")
+	acc := accountByName(t, st, "tguser")
 	bctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	bot := NewBot(cfg, st)
@@ -463,7 +440,7 @@ func TestTelegramBot(t *testing.T) {
 		t.Fatalf("no code in the cabinet: %.400s", tgBody)
 	}
 	fake.say(chat, "/start "+m)
-	if r := fake.last(t, 5*time.Second); !strings.Contains(r, "tg@example.com") || !strings.Contains(r, "Выберите действие") {
+	if r := fake.last(t, 5*time.Second); !strings.Contains(r, "tguser") || !strings.Contains(r, "Выберите действие") {
 		t.Errorf("linked: %s", r)
 	}
 	if acc2, err := st.AccountByTgChat(ctx, chat); err != nil || acc2.ID != acc.ID {
@@ -492,12 +469,12 @@ func TestTelegramBot(t *testing.T) {
 	if r := fake.last(t, 5*time.Second); !strings.Contains(r, "уже использовали") {
 		t.Errorf("promo twice: %s", r)
 	}
-	exp := accountByEmail(t, st, "tg@example.com").Expires
+	exp := accountByName(t, st, "tguser").Expires
 	fake.say(chat, "/buy 1")
 	if r := fake.last(t, 5*time.Second); !strings.Contains(r, "Платёж №") {
 		t.Errorf("buy through the provider: %s", r)
 	}
-	if got := accountByEmail(t, st, "tg@example.com").Expires; got.Sub(*exp) < 29*24*time.Hour {
+	if got := accountByName(t, st, "tguser").Expires; got.Sub(*exp) < 29*24*time.Hour {
 		t.Errorf("extended: %v", got.Sub(*exp))
 	}
 	st.AdjustBalance(ctx, acc.ID, 10000, "admin", "тест")

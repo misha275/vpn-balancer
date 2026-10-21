@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,15 +15,19 @@ import (
 // Storage of the public site: accounts, sessions, plans, payments and the certificate cache.
 
 var (
-	ErrNotFound   = errors.New("not found")
-	ErrEmailTaken = errors.New("email is already registered")
+	ErrNotFound    = errors.New("not found")
+	ErrNameTaken   = errors.New("login is already taken")
+	ErrBadUsername = errors.New("login must be 3 to 24 characters: lower case letters, digits, underscore")
+	ErrEmailTaken  = ErrNameTaken
 )
 
 // Account is a person who registered on the site. Every account owns one VPN user (the key, the period, the traffic).
 type Account struct {
 	ID        int64
-	Email     string
-	PassHash  string
+	Username  string // the login name (letters, digits, underscore)
+	Email     string // optional: old accounts and Google
+	PassHash  string // "" for accounts that sign in only through Telegram or Google
+	GoogleSub string
 	UserID    int64
 	Blocked   bool
 	Note      string
@@ -53,29 +59,55 @@ func (a *Account) User() User {
 	return User{ID: a.UserID, Name: a.UserName, UUID: a.UUID, Enabled: a.Enabled, SubToken: a.SubToken, Expires: a.Expires, Subs: a.Subs, PlanID: a.PlanID, PlanSubs: a.PlanSubs, BlockKind: a.BlockKind, BlockReason: a.BlockReason, Nick: a.Nick, Channel: a.Channel}
 }
 
-const accountCols = `a.id, a.email, a.pass_hash, a.user_id, a.blocked, a.note, a.created, a.last_login, u.name, u.uuid::text, u.sub_token, u.expires_at, u.enabled, u.subs, u.plan_id, (SELECT p.subs FROM plans p WHERE p.id=u.plan_id), COALESCE(u.block_kind,''), u.block_reason, u.nick, a.balance_cents, COALESCE(a.ref_code,''), a.referred_by, a.tg_chat, u.channel`
+const accountCols = `a.id, COALESCE(a.username,''), COALESCE(a.email,''), a.pass_hash, COALESCE(a.google_sub,''), a.user_id, a.blocked, a.note, a.created, a.last_login, u.name, u.uuid::text, u.sub_token, u.expires_at, u.enabled, u.subs, u.plan_id, (SELECT p.subs FROM plans p WHERE p.id=u.plan_id), COALESCE(u.block_kind,''), u.block_reason, u.nick, a.balance_cents, COALESCE(a.ref_code,''), a.referred_by, a.tg_chat, u.channel`
 
 func scanAccount(r pgx.Row) (*Account, error) {
 	var a Account
-	err := r.Scan(&a.ID, &a.Email, &a.PassHash, &a.UserID, &a.Blocked, &a.Note, &a.Created, &a.LastLogin, &a.UserName, &a.UUID, &a.SubToken, &a.Expires, &a.Enabled, &a.Subs, &a.PlanID, &a.PlanSubs, &a.BlockKind, &a.BlockReason, &a.Nick, &a.Balance, &a.RefCode, &a.ReferredBy, &a.TgChat, &a.Channel)
+	err := r.Scan(&a.ID, &a.Username, &a.Email, &a.PassHash, &a.GoogleSub, &a.UserID, &a.Blocked, &a.Note, &a.Created, &a.LastLogin, &a.UserName, &a.UUID, &a.SubToken, &a.Expires, &a.Enabled, &a.Subs, &a.PlanID, &a.PlanSubs, &a.BlockKind, &a.BlockReason, &a.Nick, &a.Balance, &a.RefCode, &a.ReferredBy, &a.TgChat, &a.Channel)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	return &a, err
 }
 
-// CreateAccount registers a person: a VPN user (named by the email) with trialDays of access (0 = none until a payment) and the account.
-func (s *Store) CreateAccount(ctx context.Context, email, passHash string, trialDays int) (*Account, error) {
-	return s.CreateAccountIn(ctx, email, passHash, trialDays, chanAdmin)
+// NewAccount describes a person who signs up: with a password, or through Telegram / Google.
+type NewAccount struct {
+	Username  string
+	Email     string // may be empty
+	PassHash  string // "" when there is no password
+	GoogleSub string
+	TgChat    int64 // 0 = not linked
+	TrialDays int
+	Channel   string
+}
+
+var reUsername = regexp.MustCompile(`^[a-z0-9_]{3,24}$`)
+
+// validUsername says whether the login name is fine (lower case letters, digits, underscore; 3 to 24 characters).
+func validUsername(u string) bool { return reUsername.MatchString(u) }
+
+// normUsername makes the login name canonical: lower case, no spaces around.
+func normUsername(u string) string { return strings.ToLower(strings.TrimSpace(u)) }
+
+// CreateAccount registers a person with a login and a password (trialDays of access, 0 = none until a payment).
+func (s *Store) CreateAccount(ctx context.Context, username, passHash string, trialDays int) (*Account, error) {
+	return s.CreateAccountIn(ctx, username, passHash, trialDays, chanAdmin)
 }
 
 // CreateAccountIn is CreateAccount with the channel of the balancer the new user belongs to.
-func (s *Store) CreateAccountIn(ctx context.Context, email, passHash string, trialDays int, channel string) (*Account, error) {
+func (s *Store) CreateAccountIn(ctx context.Context, username, passHash string, trialDays int, channel string) (*Account, error) {
+	return s.CreateAccountFull(ctx, NewAccount{Username: username, PassHash: passHash, TrialDays: trialDays, Channel: channel})
+}
+
+// CreateAccountFull creates the account and its VPN user (named like the login).
+func (s *Store) CreateAccountFull(ctx context.Context, na NewAccount) (*Account, error) {
+	channel := na.Channel
 	if channel != chanUsers {
 		channel = chanAdmin
 	}
-	if strings.Contains(email, "~") {
-		return nil, errors.New("bad email")
+	username := normUsername(na.Username)
+	if !validUsername(username) {
+		return nil, ErrBadUsername
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -83,27 +115,61 @@ func (s *Store) CreateAccountIn(ctx context.Context, email, passHash string, tri
 	}
 	defer tx.Rollback(ctx)
 	var taken bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM accounts WHERE email=$1) OR EXISTS(SELECT 1 FROM users WHERE name=$1)`, email).Scan(&taken); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM accounts WHERE lower(username)=$1) OR EXISTS(SELECT 1 FROM users WHERE lower(name)=$1)`, username).Scan(&taken); err != nil {
 		return nil, err
 	}
 	if taken {
-		return nil, ErrEmailTaken
+		return nil, ErrNameTaken
 	}
 	var uid int64
-	if err := tx.QueryRow(ctx, `INSERT INTO users(name, expires_at, channel) VALUES($1, now() + make_interval(days => $2), $3) RETURNING id`, email, trialDays, channel).Scan(&uid); err != nil {
+	if err := tx.QueryRow(ctx, `INSERT INTO users(name, expires_at, channel) VALUES($1, now() + make_interval(days => $2), $3) RETURNING id`, username, na.TrialDays, channel).Scan(&uid); err != nil {
 		return nil, err
 	}
+	var email, gsub *string
+	if na.Email != "" {
+		email = &na.Email
+	}
+	if na.GoogleSub != "" {
+		gsub = &na.GoogleSub
+	}
+	var tg *int64
+	if na.TgChat != 0 {
+		tg = &na.TgChat
+	}
 	var id int64
-	if err := tx.QueryRow(ctx, `INSERT INTO accounts(email, pass_hash, user_id) VALUES($1,$2,$3) RETURNING id`, email, passHash, uid).Scan(&id); err != nil {
+	if err := tx.QueryRow(ctx, `INSERT INTO accounts(username, email, pass_hash, user_id, google_sub, tg_chat) VALUES($1,$2,$3,$4,$5,$6) RETURNING id`, username, email, na.PassHash, uid, gsub, tg).Scan(&id); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		if strings.Contains(err.Error(), "23505") {
-			return nil, ErrEmailTaken
+			return nil, ErrNameTaken
 		}
 		return nil, err
 	}
 	return s.AccountByID(ctx, id)
+}
+
+// FreeUsername finds a login name that is not taken, starting from the wish (cleaned up) and adding digits.
+func (s *Store) FreeUsername(ctx context.Context, wish string) string {
+	base := regexp.MustCompile(`[^a-z0-9_]+`).ReplaceAllString(strings.ToLower(wish), "_")
+	base = strings.Trim(base, "_")
+	if len(base) < 3 {
+		base += "_user"
+	}
+	if len(base) > 20 {
+		base = base[:20]
+	}
+	for i := 0; i < 50; i++ {
+		cand := base
+		if i > 0 {
+			cand = base + strconv.Itoa(i+1)
+		}
+		var taken bool
+		if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM accounts WHERE lower(username)=$1) OR EXISTS(SELECT 1 FROM users WHERE lower(name)=$1)`, cand).Scan(&taken); err == nil && !taken {
+			return cand
+		}
+	}
+	return base + strconv.FormatInt(time.Now().UnixNano()%100000, 10)
 }
 
 func (s *Store) AccountByID(ctx context.Context, id int64) (*Account, error) {
@@ -112,6 +178,20 @@ func (s *Store) AccountByID(ctx context.Context, id int64) (*Account, error) {
 
 func (s *Store) AccountByUserID(ctx context.Context, userID int64) (*Account, error) {
 	return scanAccount(s.pool.QueryRow(ctx, `SELECT `+accountCols+` FROM accounts a JOIN users u ON u.id=a.user_id WHERE a.user_id=$1`, userID))
+}
+
+func (s *Store) AccountByUsername(ctx context.Context, username string) (*Account, error) {
+	return scanAccount(s.pool.QueryRow(ctx, `SELECT `+accountCols+` FROM accounts a JOIN users u ON u.id=a.user_id WHERE lower(a.username)=$1`, normUsername(username)))
+}
+
+func (s *Store) AccountByGoogle(ctx context.Context, sub string) (*Account, error) {
+	return scanAccount(s.pool.QueryRow(ctx, `SELECT `+accountCols+` FROM accounts a JOIN users u ON u.id=a.user_id WHERE a.google_sub=$1`, sub))
+}
+
+// SetGoogle links a Google identity (and its e-mail, when the account has none) to the account.
+func (s *Store) SetGoogle(ctx context.Context, id int64, sub, email string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE accounts SET google_sub=$2, email=COALESCE(email, NULLIF($3,'')) WHERE id=$1`, id, sub, email)
+	return err
 }
 
 func (s *Store) AccountByEmail(ctx context.Context, email string) (*Account, error) {
@@ -365,7 +445,7 @@ func (s *Store) seedPlans(ctx context.Context) error {
 type Payment struct {
 	ID          int64      `json:"id"`
 	AccountID   int64      `json:"account_id"`
-	Email       string     `json:"email"`
+	Username    string     `json:"username"`
 	PlanName    string     `json:"plan_name"`
 	Days        int        `json:"days"`
 	AmountCents int        `json:"amount_cents"`
@@ -378,14 +458,14 @@ type Payment struct {
 	PromoCode   string     `json:"promo_code,omitempty"`
 }
 
-const paymentCols = `p.id, p.account_id, a.email, p.plan_name, p.days, p.amount_cents, p.currency, p.status, p.provider, p.created, p.paid_at, p.kind, p.promo_code`
+const paymentCols = `p.id, p.account_id, COALESCE(a.username,''), p.plan_name, p.days, p.amount_cents, p.currency, p.status, p.provider, p.created, p.paid_at, p.kind, p.promo_code`
 
 func scanPayments(rows pgx.Rows) ([]Payment, error) {
 	defer rows.Close()
 	out := []Payment{}
 	for rows.Next() {
 		var p Payment
-		if err := rows.Scan(&p.ID, &p.AccountID, &p.Email, &p.PlanName, &p.Days, &p.AmountCents, &p.Currency, &p.Status, &p.Provider, &p.Created, &p.PaidAt, &p.Kind, &p.PromoCode); err != nil {
+		if err := rows.Scan(&p.ID, &p.AccountID, &p.Username, &p.PlanName, &p.Days, &p.AmountCents, &p.Currency, &p.Status, &p.Provider, &p.Created, &p.PaidAt, &p.Kind, &p.PromoCode); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -575,4 +655,60 @@ func (s *Store) BulkPlanSubs(ctx context.Context, mode string, keys, base []stri
 		users = tag.RowsAffected()
 	}
 	return plans, users, nil
+}
+
+// ---- sign-in through the Telegram bot ----
+
+const tgLoginTTL = "10 minutes"
+
+// NewTgLogin records a request to sign in through the bot. token goes into the link the person opens in Telegram, secret stays in the browser.
+func (s *Store) NewTgLogin(ctx context.Context, token, secret, ip, agent, ref string) error {
+	_, _ = s.pool.Exec(ctx, `DELETE FROM tg_logins WHERE created < now() - interval '`+tgLoginTTL+`'`)
+	_, err := s.pool.Exec(ctx, `INSERT INTO tg_logins(token_hash, secret_hash, ip, agent, ref) VALUES($1,$2,$3,$4,$5)`, tokenHash(token), tokenHash(secret), ip, agent, ref)
+	return err
+}
+
+// TgLoginInfo returns where a pending request came from (ip, browser); ErrNotFound when it is gone, answered or old.
+func (s *Store) TgLoginInfo(ctx context.Context, token string) (ip, agent string, err error) {
+	err = s.pool.QueryRow(ctx, `SELECT ip, agent FROM tg_logins WHERE token_hash=$1 AND state='wait' AND created > now() - interval '`+tgLoginTTL+`'`, tokenHash(token)).Scan(&ip, &agent)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = ErrNotFound
+	}
+	return
+}
+
+// TgLoginAnswer is the person's answer in the bot: ok = «Да, это я».
+func (s *Store) TgLoginAnswer(ctx context.Context, token string, ok bool, chat int64, name string) error {
+	state := "no"
+	if ok {
+		state = "ok"
+	}
+	tag, err := s.pool.Exec(ctx, `UPDATE tg_logins SET state=$2, tg_chat=$3, tg_name=$4 WHERE token_hash=$1 AND state='wait' AND created > now() - interval '`+tgLoginTTL+`'`, tokenHash(token), state, chat, name)
+	if err == nil && tag.RowsAffected() == 0 {
+		err = ErrNotFound
+	}
+	return err
+}
+
+// TgLoginTake looks at the request of a browser. "wait" keeps the row; "ok" and "no" are returned once and the row is deleted; "gone" = unknown or old.
+func (s *Store) TgLoginTake(ctx context.Context, secret string) (state string, chat int64, name, ref string, err error) {
+	var c *int64
+	err = s.pool.QueryRow(ctx, `SELECT state, tg_chat, tg_name, ref FROM tg_logins WHERE secret_hash=$1 AND created > now() - interval '`+tgLoginTTL+`'`, tokenHash(secret)).Scan(&state, &c, &name, &ref)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "gone", 0, "", "", nil
+	}
+	if err != nil {
+		return
+	}
+	if state == "wait" {
+		return
+	}
+	tag, derr := s.pool.Exec(ctx, `DELETE FROM tg_logins WHERE secret_hash=$1`, tokenHash(secret))
+	if derr != nil || tag.RowsAffected() == 0 {
+		return "gone", 0, "", "", derr
+	}
+	if c != nil {
+		chat = *c
+	}
+	return
 }

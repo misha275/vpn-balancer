@@ -97,6 +97,9 @@ const botNeedLink = "Это бот сервиса. Чтобы привязать
 // Respond answers a text message of a chat with the buttons.
 func (b *Bot) Respond(ctx context.Context, chat int64, text string) Reply {
 	text = strings.TrimSpace(text)
+	if f := strings.Fields(text); len(f) == 2 && strings.EqualFold(strings.SplitN(f[0], "@", 2)[0], "/start") && strings.HasPrefix(f[1], "lg_") {
+		return b.loginPrompt(ctx, strings.TrimPrefix(f[1], "lg_"))
+	}
 	acc, err := b.st.AccountByTgChat(ctx, chat)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		log.Printf("bot: %v", err)
@@ -106,7 +109,7 @@ func (b *Bot) Respond(ctx context.Context, chat int64, text string) Reply {
 		out := b.Handle(ctx, chat, text)
 		if !strings.HasPrefix(text, "/") { // a bare code that links the account
 			if a, err := b.st.LinkTelegram(ctx, text, chat); err == nil {
-				return Reply{Text: "Готово, аккаунт " + a.Email + " привязан. Выберите действие:", Kb: b.mainKb()}
+				return Reply{Text: "Готово, аккаунт " + a.Username + " привязан. Выберите действие:", Kb: b.mainKb()}
 			}
 			return b.unlinkedReply(botNeedLink)
 		}
@@ -148,6 +151,14 @@ func firstWord(s string) string {
 
 // Callback answers a button press.
 func (b *Bot) Callback(ctx context.Context, chat int64, data string) Reply {
+	return b.CallbackAs(ctx, chat, data, "")
+}
+
+// CallbackAs is Callback that also knows the Telegram name of the sender (it names a new account made by «sign in through Telegram»).
+func (b *Bot) CallbackAs(ctx context.Context, chat int64, data, name string) Reply {
+	if strings.HasPrefix(data, "lgok:") || strings.HasPrefix(data, "lgno:") {
+		return b.loginAnswer(ctx, chat, strings.TrimPrefix(data[4:], ":"), data[:4] == "lgok", name)
+	}
 	acc, err := b.st.AccountByTgChat(ctx, chat)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		log.Printf("bot: %v", err)
@@ -213,4 +224,28 @@ func (b *Bot) Callback(ctx context.Context, chat int64, data string) Reply {
 		return b.unlinkedReply("Telegram отвязан от аккаунта.")
 	}
 	return Reply{Text: "Главное меню. Всё делается кнопками.", Kb: b.mainKb()}
+}
+
+// loginPrompt answers the link «sign in through Telegram» opened from the site: it shows where the request came from.
+func (b *Bot) loginPrompt(ctx context.Context, token string) Reply {
+	ip, agent, err := b.st.TgLoginInfo(ctx, token)
+	if err != nil {
+		return Reply{Text: "Запрос входа не найден или устарел (он действует 10 минут). Нажмите «Войти через Telegram» на сайте ещё раз."}
+	}
+	text := "Вход на сайт\nАдрес: " + ip
+	if agent != "" {
+		text += "\nБраузер: " + agent
+	}
+	text += "\n\nЭто вы? Если вы ничего не открывали, нажмите «Нет»."
+	return Reply{Text: text, Kb: [][]Btn{{{Text: "✅ Да, это я", Data: "lgok:" + token}, {Text: "❌ Нет", Data: "lgno:" + token}}}}
+}
+
+func (b *Bot) loginAnswer(ctx context.Context, chat int64, token string, ok bool, name string) Reply {
+	if err := b.st.TgLoginAnswer(ctx, token, ok, chat, name); err != nil {
+		return Reply{Text: "Запрос входа не найден или устарел. Нажмите «Войти через Telegram» на сайте ещё раз."}
+	}
+	if !ok {
+		return Reply{Text: "Вход отклонён."}
+	}
+	return Reply{Text: "Подтверждено. Вернитесь на сайт: страница обновится сама."}
 }

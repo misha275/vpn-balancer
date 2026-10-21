@@ -375,7 +375,7 @@ func (s *Site) forumNewPost(w http.ResponseWriter, r *http.Request) {
 		d.Error = msg
 		s.render(w, code, "forum_new", d)
 	}
-	if s.forumLimit.blocked(acc.Email) {
+	if s.forumLimit.blocked(acc.Username) {
 		fail(429, "Слишком много сообщений. Попробуйте позже")
 		return
 	}
@@ -389,7 +389,7 @@ func (s *Site) forumNewPost(w http.ResponseWriter, r *http.Request) {
 		fail(400, err.Error())
 		return
 	}
-	s.forumLimit.hit(acc.Email)
+	s.forumLimit.hit(acc.Username)
 	http.Redirect(w, r, "/forum/"+strconv.FormatInt(id, 10), http.StatusSeeOther)
 }
 
@@ -434,7 +434,7 @@ func (s *Site) forumReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if s.forumLimit.blocked(acc.Email) {
+	if s.forumLimit.blocked(acc.Username) {
 		s.renderTopic(w, r, acc, h, 429, "Слишком много сообщений. Попробуйте позже", r.PostForm.Get("body"))
 		return
 	}
@@ -451,7 +451,7 @@ func (s *Site) forumReply(w http.ResponseWriter, r *http.Request) {
 		s.renderTopic(w, r, acc, h, code, err.Error(), r.PostForm.Get("body"))
 		return
 	}
-	s.forumLimit.hit(acc.Email)
+	s.forumLimit.hit(acc.Username)
 	http.Redirect(w, r, "/forum/"+strconv.FormatInt(id, 10)+"#last", http.StatusSeeOther)
 }
 
