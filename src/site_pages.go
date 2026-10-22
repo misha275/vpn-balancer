@@ -46,7 +46,9 @@ const siteTplText = `
 {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
 <meta http-equiv="refresh" content="4;url=/auth/telegram/check">
 <p>1. Нажмите кнопку и откройте бота в Telegram.<br>2. В боте нажмите «Да, это я».<br>3. Вернитесь сюда: страница обновится сама.</p>
-<p><a class="btn" href="{{.TgLink}}" target="_blank" rel="noopener">Открыть Telegram</a></p>
+<p><a class="btn" id="tglink" href="{{.TgLink}}" target="_blank" rel="noopener">Открыть Telegram</a></p>
+<script nonce="{{.Nonce}}">(function(){var a=document.getElementById("tglink"),p=window.TelegramWebviewProxy;if(!a||!p||!p.postEvent)return;
+a.addEventListener("click",function(e){e.preventDefault();try{p.postEvent("web_app_open_tg_link",JSON.stringify({path_full:a.getAttribute("href").replace("https://t.me","")}));}catch(x){location.href=a.href;}});})();</script>
 <p class="muted">Ждём подтверждения… Ссылка действует 10 минут. <a href="/auth/telegram/check">Проверить сейчас</a> · <a href="/login">Отмена</a></p></div>
 {{template "foot" .}}{{end}}
 

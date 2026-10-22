@@ -400,7 +400,7 @@ func TestSubscriptionHeadersShowUsageAndExpiry(t *testing.T) {
 	if !strings.Contains(h.Get("subscription-userinfo"), "expire=0") {
 		t.Errorf("no end date means expire=0: %q", h.Get("subscription-userinfo"))
 	}
-	if a, _ := base64.StdEncoding.DecodeString(strings.TrimPrefix(h.Get("announce"), "base64:")); string(a) != "Подписка бессрочная" {
-		t.Errorf("unlimited subscription says so: %q", h.Get("announce"))
+	if h.Get("announce") != "" || !strings.Contains(h.Get("subscription-userinfo"), "expire=0") {
+		t.Errorf("an unlimited subscription is shown by the traffic line alone (no second line): %q %q", h.Get("announce"), h.Get("subscription-userinfo"))
 	}
 }
