@@ -56,7 +56,19 @@ type RemoteServer struct {
 	Note     string     `json:"note"`
 	Up       int64      `json:"up"`
 	Down     int64      `json:"down"`
+	// Route says how an end-node server is given out: direct (the link of the server), panel (people connect to the main
+	// server and leave through this one) or balancer (the server is one more node of the balancer pool).
+	Route   string   `json:"route"`
+	Bundles []string `json:"bundles"` // keys ("b:slug") of the enabled categories that contain the server
 }
+
+const (
+	routeDirect   = "direct"
+	routePanel    = "panel"
+	routeBalancer = "balancer"
+)
+
+func validRoute(m string) bool { return m == routeDirect || m == routePanel || m == routeBalancer }
 
 var reSSUser = regexp.MustCompile(`\{SS:([a-z0-9-]+)\}`)
 
@@ -104,11 +116,11 @@ func (s *Store) CreateServer(ctx context.Context, name, kind, note string) (Remo
 }
 
 const serverCols = `s.id,s.name,s.kind,s.enabled,s.info,s.last_seen,s.created,s.note,
-	COALESCE((SELECT SUM(up) FROM server_traffic t WHERE t.server_id=s.id),0),COALESCE((SELECT SUM(down) FROM server_traffic t WHERE t.server_id=s.id),0)`
+	COALESCE((SELECT SUM(up) FROM server_traffic t WHERE t.server_id=s.id),0),COALESCE((SELECT SUM(down) FROM server_traffic t WHERE t.server_id=s.id),0),s.route_mode`
 
 func scanServer(r pgx.Row, sv *RemoteServer) error {
 	var info []byte
-	if err := r.Scan(&sv.ID, &sv.Name, &sv.Kind, &sv.Enabled, &info, &sv.LastSeen, &sv.Created, &sv.Note, &sv.Up, &sv.Down); err != nil {
+	if err := r.Scan(&sv.ID, &sv.Name, &sv.Kind, &sv.Enabled, &info, &sv.LastSeen, &sv.Created, &sv.Note, &sv.Up, &sv.Down, &sv.Route); err != nil {
 		return err
 	}
 	_ = json.Unmarshal(info, &sv.Info)
@@ -129,14 +141,60 @@ func (s *Store) ListServers(ctx context.Context) ([]RemoteServer, error) {
 		}
 		out = append(out, sv)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	by := s.serverBundles(ctx)
+	for i := range out {
+		out[i].Bundles = by[out[i].ID]
+	}
+	return out, nil
 }
+
+// serverBundles maps a server to the keys of the enabled categories it is in.
+func (s *Store) serverBundles(ctx context.Context) map[int64][]string {
+	out := map[int64][]string{}
+	rows, err := s.pool.Query(ctx, `SELECT bs.server_id, b.slug FROM bundle_servers bs JOIN bundles b ON b.id=bs.bundle_id WHERE b.enabled ORDER BY b.sort, b.id`)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var slug string
+		if rows.Scan(&id, &slug) == nil {
+			out[id] = append(out[id], bundlePrefix+slug)
+		}
+	}
+	return out
+}
+
+// SetServerRoute chooses how an end-node server is given out.
+func (s *Store) SetServerRoute(ctx context.Context, id int64, mode string) error {
+	if !validRoute(mode) {
+		return errors.New("режим: direct (напрямую), panel (через сервер с панелью) или balancer (в пул балансировщика)")
+	}
+	t, err := s.pool.Exec(ctx, `UPDATE servers SET route_mode=$2 WHERE id=$1 AND kind='endnode'`, id, mode)
+	if err == nil && t.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	if err == nil && mode != routeBalancer {
+		_, _ = s.pool.Exec(ctx, `DELETE FROM nodes WHERE source=$1`, serverSource(id))
+	}
+	return err
+}
+
+func serverSource(id int64) string { return fmt.Sprintf("server:%d", id) }
 
 func (s *Store) ServerByToken(ctx context.Context, tok string) (*RemoteServer, error) {
 	var sv RemoteServer
 	err := scanServer(s.pool.QueryRow(ctx, `SELECT `+serverCols+` FROM servers s WHERE s.token_hash=$1`, hashToken(tok)), &sv)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
+	}
+	if err == nil {
+		sv.Bundles = s.serverBundles(ctx)[sv.ID]
 	}
 	return &sv, err
 }
@@ -249,6 +307,11 @@ func keysGiveServer(keys []string, sv RemoteServer) bool {
 	if hasSub(keys, subAll) || hasSub(keys, fmt.Sprintf("%s%d", serverPrefix, sv.ID)) {
 		return true
 	}
+	for _, b := range sv.Bundles { // a category that contains the server
+		if hasSub(keys, b) {
+			return true
+		}
+	}
 	if sv.Kind == "balancer" {
 		return hasSub(keys, subBalancers)
 	}
@@ -268,6 +331,9 @@ func (s *Store) SyncUsersFor(ctx context.Context, cfg *Config, sv RemoteServer) 
 			out = append(out, SyncUser{u.Name, u.UUID, u.SubToken, u.Expires, u.Chan()})
 		}
 	}
+	if sv.Kind == "endnode" && sv.Enabled && sv.Route != "" && sv.Route != routeDirect {
+		out = append(out, SyncUser{Name: gwUserName, UUID: gwUUID(cfg, sv.ID)}) // the main server enters this server with its own key
+	}
 	return out, nil
 }
 
@@ -284,6 +350,7 @@ func (s *Store) RefreshRemote(ctx context.Context, cfg *Config) {
 	cfg.remote = list
 	cfg.remoteAt = time.Now()
 	cfg.mu.Unlock()
+	s.refreshPoolServers(ctx, cfg, list)
 }
 
 func (s *Store) RemoteLoop(ctx context.Context, cfg *Config) {
@@ -427,6 +494,7 @@ func (s *Site) syncHandler(w http.ResponseWriter, r *http.Request) {
 func (a *API) registerServers(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/servers", a.auth(a.serversList))
 	mux.HandleFunc("POST /api/servers", a.auth(a.serverCreate))
+	mux.HandleFunc("POST /api/servers/{id}/route", a.auth(a.serverRoute))
 	mux.HandleFunc("POST /api/servers/{id}/{op}", a.auth(a.serverOp))
 	mux.HandleFunc("DELETE /api/servers/{id}", a.auth(a.serverDelete))
 }
@@ -504,6 +572,29 @@ func (a *API) serverOp(w http.ResponseWriter, r *http.Request) {
 	}
 	go a.store.RefreshRemote(context.Background(), a.cfg)
 	writeJSON(w, 200, resp)
+}
+
+// serverRoute chooses how an end-node server is given out: {"mode": "direct" | "panel" | "balancer"}.
+func (a *API) serverRoute(w http.ResponseWriter, r *http.Request) {
+	var id int64
+	fmt.Sscan(r.PathValue("id"), &id)
+	var in struct {
+		Mode string `json:"mode"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&in); err != nil {
+		apiErr(w, 400, errors.New("ожидается JSON {mode}"))
+		return
+	}
+	if err := a.store.SetServerRoute(r.Context(), id, in.Mode); err != nil {
+		code := 400
+		if errors.Is(err, ErrNotFound) {
+			code = 404
+		}
+		apiErr(w, code, err)
+		return
+	}
+	a.store.RefreshRemote(r.Context(), a.cfg)
+	writeJSON(w, 200, map[string]string{"ok": "готово"})
 }
 
 func (a *API) cachedServers(r *http.Request) []RemoteServer {

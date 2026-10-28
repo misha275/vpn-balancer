@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -136,11 +137,15 @@ type Bundle struct {
 	Main    bool    `json:"main"`    // contains the main server: its three balancers
 	Nodes   []int64 `json:"nodes"`   // single servers (added by hand)
 	Sources []int64 `json:"sources"` // whole subscriptions of external servers
+	Servers []int64 `json:"servers"` // installed end-node servers (how each is given out is the server's own setting)
+	// Order is the order of the items: "main", "n:<node>", "x:<subscription>", "s:<server>". What it does not mention follows in the usual order.
+	Order []string `json:"order"`
 }
 
 func (s *Store) ListBundles(ctx context.Context, onlyEnabled bool) ([]Bundle, error) {
 	q := `SELECT b.id,b.slug,b.name,b.enabled,b.sort,b.with_main, COALESCE(array_agg(n.node_id ORDER BY n.sort,n.node_id) FILTER (WHERE n.node_id IS NOT NULL), '{}'),
-		COALESCE((SELECT array_agg(bs.source_id ORDER BY bs.source_id) FROM bundle_sources bs WHERE bs.bundle_id=b.id), '{}')
+		COALESCE((SELECT array_agg(bs.source_id ORDER BY bs.source_id) FROM bundle_sources bs WHERE bs.bundle_id=b.id), '{}'),
+		COALESCE((SELECT array_agg(vs.server_id ORDER BY vs.server_id) FROM bundle_servers vs WHERE vs.bundle_id=b.id), '{}'), COALESCE(b.item_order,'{}')
 		FROM bundles b LEFT JOIN bundle_nodes n ON n.bundle_id=b.id`
 	if onlyEnabled {
 		q += ` WHERE b.enabled`
@@ -153,7 +158,7 @@ func (s *Store) ListBundles(ctx context.Context, onlyEnabled bool) ([]Bundle, er
 	out := []Bundle{}
 	for rows.Next() {
 		var b Bundle
-		if err := rows.Scan(&b.ID, &b.Slug, &b.Name, &b.Enabled, &b.Sort, &b.Main, &b.Nodes, &b.Sources); err != nil {
+		if err := rows.Scan(&b.ID, &b.Slug, &b.Name, &b.Enabled, &b.Sort, &b.Main, &b.Nodes, &b.Sources, &b.Servers, &b.Order); err != nil {
 			return nil, err
 		}
 		out = append(out, b)
@@ -173,7 +178,7 @@ func (b *Bundle) validate() error {
 	if b.Slug == subBalancers || b.Slug == subAll || b.Slug == subServers {
 		return errors.New("этот адрес занят встроенной подпиской")
 	}
-	if len(b.Nodes) > 2000 || len(b.Sources) > 200 {
+	if len(b.Nodes) > 2000 || len(b.Sources) > 200 || len(b.Servers) > 200 || len(b.Order) > 3000 {
 		return errors.New("слишком много серверов в категории")
 	}
 	return nil
@@ -189,7 +194,7 @@ func (s *Store) SaveBundle(ctx context.Context, b Bundle) (int64, error) {
 	}
 	defer tx.Rollback(ctx)
 	if b.ID == 0 {
-		err = tx.QueryRow(ctx, `INSERT INTO bundles(slug,name,enabled,sort,with_main) VALUES($1,$2,$3,$4,$5) RETURNING id`, b.Slug, b.Name, b.Enabled, b.Sort, b.Main).Scan(&b.ID)
+		err = tx.QueryRow(ctx, `INSERT INTO bundles(slug,name,enabled,sort,with_main,item_order) VALUES($1,$2,$3,$4,$5,$6) RETURNING id`, b.Slug, b.Name, b.Enabled, b.Sort, b.Main, b.cleanOrder()).Scan(&b.ID)
 	} else {
 		var old string
 		if err = tx.QueryRow(ctx, `SELECT slug FROM bundles WHERE id=$1`, b.ID).Scan(&old); errors.Is(err, pgx.ErrNoRows) {
@@ -198,7 +203,7 @@ func (s *Store) SaveBundle(ctx context.Context, b Bundle) (int64, error) {
 			return 0, errors.New("адрес сборки менять нельзя: он записан в списках подписок пользователей и тарифов (создайте новую сборку)")
 		}
 		if err == nil {
-			_, err = tx.Exec(ctx, `UPDATE bundles SET name=$2, enabled=$3, sort=$4, with_main=$5 WHERE id=$1`, b.ID, b.Name, b.Enabled, b.Sort, b.Main)
+			_, err = tx.Exec(ctx, `UPDATE bundles SET name=$2, enabled=$3, sort=$4, with_main=$5, item_order=$6 WHERE id=$1`, b.ID, b.Name, b.Enabled, b.Sort, b.Main, b.cleanOrder())
 		}
 	}
 	if err != nil {
@@ -233,7 +238,35 @@ func (s *Store) SaveBundle(ctx context.Context, b Bundle) (int64, error) {
 			return 0, err
 		}
 	}
+	if _, err = tx.Exec(ctx, `DELETE FROM bundle_servers WHERE bundle_id=$1`, b.ID); err != nil {
+		return 0, err
+	}
+	seenSrv := map[int64]bool{}
+	for _, id := range b.Servers {
+		if seenSrv[id] {
+			continue
+		}
+		seenSrv[id] = true
+		if _, err = tx.Exec(ctx, `INSERT INTO bundle_servers(bundle_id,server_id) SELECT $1,$2 WHERE EXISTS (SELECT 1 FROM servers WHERE id=$2 AND kind='endnode')`, b.ID, id); err != nil {
+			return 0, err
+		}
+	}
 	return b.ID, tx.Commit(ctx)
+}
+
+var reOrderItem = regexp.MustCompile(`^(main|[nxs]:[0-9]{1,18})$`)
+
+// cleanOrder keeps the well-formed items of the order, once each (an item that is not in the category is ignored when it is shown).
+func (b *Bundle) cleanOrder() []string {
+	out := []string{}
+	seen := map[string]bool{}
+	for _, t := range b.Order {
+		if reOrderItem.MatchString(t) && !seen[t] {
+			seen[t] = true
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // DeleteBundle removes the bundle and its key from every list of users, plans and the default.

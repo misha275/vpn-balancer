@@ -54,12 +54,21 @@ type catalogSub struct {
 }
 
 type catalogView struct {
-	Nodes   []CustomNode `json:"nodes"`
-	Sources []ExtSource  `json:"sources"` // subscriptions of external servers
-	Bundles []Bundle     `json:"bundles"` // categories
-	Subs    []catalogSub `json:"subs"`    // everything that can be given to a user, a plan or the default list
-	Default []string     `json:"default_subs"`
-	Days    int          `json:"default_days"`
+	Nodes   []CustomNode    `json:"nodes"`
+	Sources []ExtSource     `json:"sources"` // subscriptions of external servers
+	Bundles []Bundle        `json:"bundles"` // categories
+	Subs    []catalogSub    `json:"subs"`    // everything that can be given to a user, a plan or the default list
+	Default []string        `json:"default_subs"`
+	Days    int             `json:"default_days"`
+	Servers []catalogServer `json:"servers"` // installed end-node servers that can be put into categories
+}
+
+type catalogServer struct {
+	ID      int64  `json:"id"`
+	Name    string `json:"name"`
+	Route   string `json:"route"` // direct | panel | balancer
+	Enabled bool   `json:"enabled"`
+	Online  bool   `json:"online"`
 }
 
 func (a *API) catalog(r *http.Request) (*catalogView, error) {
@@ -84,6 +93,9 @@ func (a *API) catalog(r *http.Request) (*catalogView, error) {
 				t += " (выключен)"
 			}
 			v.Subs = append(v.Subs, catalogSub{fmt.Sprintf("%s%d", serverPrefix, sv.ID), t, false})
+			if sv.Kind == "endnode" {
+				v.Servers = append(v.Servers, catalogServer{sv.ID, sv.Name, sv.Route, sv.Enabled, sv.LastSeen != nil && time.Since(*sv.LastSeen) < 5*time.Minute})
+			}
 		}
 	}
 	for _, b := range bs {

@@ -259,15 +259,28 @@ type extNode struct {
 type bundleInfo struct {
 	Slug, Name string
 	WithMain   bool
-	Nodes      []*extNode
+	Nodes      []*extNode           // every external node the category may send through the main server (for the gateway)
+	Order      []string             // the order set by the administrator: "main", "n:<node>", "x:<source>", "s:<server>"
+	single     []*extNode           // servers added by link, in their order
+	sources    []int64              // external subscriptions
+	srcNodes   map[int64][]*extNode // nodes of each subscription
+	servers    []int64              // installed servers
 }
 
 type subIndex struct {
 	Bundles map[string]*bundleInfo // "b:slug" of the enabled categories
+	Servers map[int64]RemoteServer // installed servers (end-node) by number
 }
 
-func (s *Store) LoadSubIndex(ctx context.Context) (*subIndex, error) {
-	ix := &subIndex{Bundles: map[string]*bundleInfo{}}
+func (s *Store) LoadSubIndex(ctx context.Context, cfg *Config) (*subIndex, error) {
+	ix := &subIndex{Bundles: map[string]*bundleInfo{}, Servers: map[int64]RemoteServer{}}
+	if svs, err := s.ListServers(ctx); err == nil {
+		for _, sv := range svs {
+			if sv.Kind == "endnode" {
+				ix.Servers[sv.ID] = sv
+			}
+		}
+	}
 	nodes := map[int64]*extNode{}
 	rows, err := s.pool.Query(ctx, `SELECT c.id,c.name,c.link,c.mode FROM custom_nodes c LEFT JOIN ext_sources e ON e.id=c.source_id WHERE c.enabled AND (c.source_id IS NULL OR e.enabled)`)
 	if err != nil {
@@ -283,14 +296,15 @@ func (s *Store) LoadSubIndex(ctx context.Context) (*subIndex, error) {
 	}
 	rows.Close()
 	byID := map[int64]*bundleInfo{}
-	br, err := s.pool.Query(ctx, `SELECT id,slug,name,with_main FROM bundles WHERE enabled ORDER BY sort,id`)
+	br, err := s.pool.Query(ctx, `SELECT id,slug,name,with_main,COALESCE(item_order,'{}') FROM bundles WHERE enabled ORDER BY sort,id`)
 	if err != nil {
 		return nil, err
 	}
 	for br.Next() {
 		var id int64
 		b := &bundleInfo{}
-		if err := br.Scan(&id, &b.Slug, &b.Name, &b.WithMain); err != nil {
+		b.srcNodes = map[int64][]*extNode{}
+		if err := br.Scan(&id, &b.Slug, &b.Name, &b.WithMain, &b.Order); err != nil {
 			br.Close()
 			return nil, err
 		}
@@ -299,7 +313,7 @@ func (s *Store) LoadSubIndex(ctx context.Context) (*subIndex, error) {
 	}
 	br.Close()
 	have := map[int64]map[int64]bool{}
-	add := func(bid, nid int64) {
+	add := func(bid, nid, src int64) {
 		b, n := byID[bid], nodes[nid]
 		if b == nil || n == nil {
 			return
@@ -310,26 +324,65 @@ func (s *Store) LoadSubIndex(ctx context.Context) (*subIndex, error) {
 		if !have[bid][nid] {
 			have[bid][nid] = true
 			b.Nodes = append(b.Nodes, n)
+			if src == 0 {
+				b.single = append(b.single, n)
+			} else {
+				b.srcNodes[src] = append(b.srcNodes[src], n)
+			}
 		}
 	}
-	for _, q := range []string{
-		`SELECT bundle_id,node_id FROM bundle_nodes ORDER BY bundle_id, sort, node_id`,
-		`SELECT bs.bundle_id,c.id FROM bundle_sources bs JOIN custom_nodes c ON c.source_id=bs.source_id ORDER BY bs.bundle_id, c.id`,
-	} {
-		mr, err := s.pool.Query(ctx, q)
-		if err != nil {
+	mr, err := s.pool.Query(ctx, `SELECT bundle_id,node_id FROM bundle_nodes ORDER BY bundle_id, sort, node_id`)
+	if err != nil {
+		return nil, err
+	}
+	for mr.Next() {
+		var bid, nid int64
+		if err := mr.Scan(&bid, &nid); err != nil {
+			mr.Close()
 			return nil, err
 		}
-		for mr.Next() {
-			var bid, nid int64
-			if err := mr.Scan(&bid, &nid); err != nil {
-				mr.Close()
-				return nil, err
-			}
-			add(bid, nid)
-		}
-		mr.Close()
+		add(bid, nid, 0)
 	}
+	mr.Close()
+	sr, err := s.pool.Query(ctx, `SELECT bs.bundle_id,bs.source_id,c.id FROM bundle_sources bs LEFT JOIN custom_nodes c ON c.source_id=bs.source_id ORDER BY bs.bundle_id, bs.source_id, c.id`)
+	if err != nil {
+		return nil, err
+	}
+	for sr.Next() {
+		var bid, src int64
+		var nid *int64
+		if err := sr.Scan(&bid, &src, &nid); err != nil {
+			sr.Close()
+			return nil, err
+		}
+		if b := byID[bid]; b != nil && !containsID(b.sources, src) {
+			b.sources = append(b.sources, src)
+		}
+		if nid != nil {
+			add(bid, *nid, src)
+		}
+	}
+	sr.Close()
+	vr, err := s.pool.Query(ctx, `SELECT bundle_id,server_id FROM bundle_servers ORDER BY bundle_id, server_id`)
+	if err != nil {
+		return nil, err
+	}
+	for vr.Next() {
+		var bid, sid int64
+		if err := vr.Scan(&bid, &sid); err != nil {
+			vr.Close()
+			return nil, err
+		}
+		b, sv := byID[bid], ix.Servers[sid]
+		if b == nil || sv.ID == 0 {
+			continue
+		}
+		b.servers = append(b.servers, sid)
+		for _, n := range serverExtNodes(cfg, sv) { // servers given through the main server go to the gateway like external ones
+			b.Nodes = append(b.Nodes, n)
+		}
+	}
+	vr.Close()
 	return ix, nil
 }
 
@@ -360,20 +413,85 @@ func (ix *subIndex) access(cfg *Config, u User) (main bool, via []int64) {
 	return main, via
 }
 
-// lines renders a category for a user: the main server first (if the category has it), then the servers in their order.
+func containsID(l []int64, id int64) bool {
+	for _, x := range l {
+		if x == id {
+			return true
+		}
+	}
+	return false
+}
+
+// items lists what a category consists of, in the order the administrator set; whatever the order does not mention
+// follows in the usual way: the main server, single servers, subscriptions, installed servers.
+func (b *bundleInfo) items() []string {
+	have := map[string]bool{}
+	var all []string
+	if b.WithMain {
+		all = append(all, "main")
+	}
+	for _, n := range b.single {
+		all = append(all, "n:"+strconv.FormatInt(n.ID, 10))
+	}
+	for _, id := range b.sources {
+		all = append(all, "x:"+strconv.FormatInt(id, 10))
+	}
+	for _, id := range b.servers {
+		all = append(all, "s:"+strconv.FormatInt(id, 10))
+	}
+	for _, t := range all {
+		have[t] = true
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, t := range b.Order {
+		if have[t] && !seen[t] {
+			seen[t] = true
+			out = append(out, t)
+		}
+	}
+	for _, t := range all {
+		if !seen[t] {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// lines renders a category for a user: its items in their order.
 func (ix *subIndex) lines(cfg *Config, u User, slug string) (name string, out []string, ok bool) {
 	b := ix.Bundles[bundlePrefix+slug]
 	if b == nil {
 		return "", nil, false
 	}
-	if b.WithMain {
-		out = append(out, RenderBalancers(cfg, &u)...)
-	}
-	for _, n := range b.Nodes {
+	nodeLine := func(n *extNode) string {
 		if n.Mode == modeVia {
-			out = append(out, userLink(cfg, n.Name, modeUUID(u.UUID, extMode(n.ID))))
-		} else {
-			out = append(out, relabelCustom(n.Link, n.Name))
+			return userLink(cfg, n.Name, modeUUID(u.UUID, extMode(n.ID)))
+		}
+		return relabelCustom(n.Link, n.Name)
+	}
+	byID := map[int64]*extNode{}
+	for _, n := range b.single {
+		byID[n.ID] = n
+	}
+	for _, t := range b.items() {
+		kind, ref, _ := strings.Cut(t, ":")
+		id, _ := strconv.ParseInt(ref, 10, 64)
+		switch kind {
+		case "main":
+			out = append(out, RenderBalancers(cfg, &u)...)
+		case "n":
+			if n := byID[id]; n != nil {
+				out = append(out, nodeLine(n))
+			}
+		case "x":
+			for _, n := range b.srcNodes[id] {
+				out = append(out, nodeLine(n))
+			}
+		case "s":
+			if sv, ok := ix.Servers[id]; ok {
+				out = append(out, serverLines(cfg, u, sv)...)
+			}
 		}
 	}
 	return b.Name, dedupe(out), true
@@ -424,7 +542,7 @@ func prepareUsers(cfg *Config, ix *subIndex, us []User) ([]User, []ExtNode) {
 
 // PrepareGateway loads the index, marks the users and hands the external servers in use to the configuration.
 func (s *Store) PrepareGateway(ctx context.Context, cfg *Config, us []User) ([]User, error) {
-	ix, err := s.LoadSubIndex(ctx)
+	ix, err := s.LoadSubIndex(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}

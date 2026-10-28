@@ -925,8 +925,19 @@ VIEWS.servers=function(){
   const sub=SUB.servers||"groups";
   return h("div",{},subNav(SSUB,sub,subGo),({groups:sGroups,links:sLinks,sources:sSources,net:vNet})[sub]());
 };
-function bundleDraft(b){ return {id:b.id||0,name:b.name||"",slug:b.slug||"",enabled:b.enabled!==false,sort:b.sort||0,main:!!b.main,nodes:new Set(b.nodes||[]),sources:new Set(b.sources||[])}; }
-function bundleBody(d){ return {name:d.name,slug:d.slug,enabled:d.enabled,sort:d.sort,main:d.main,nodes:[...d.nodes],sources:[...d.sources]}; }
+function bundleDraft(b){ return {id:b.id||0,name:b.name||"",slug:b.slug||"",enabled:b.enabled!==false,sort:b.sort||0,main:!!b.main,nodes:new Set(b.nodes||[]),sources:new Set(b.sources||[]),servers:new Set(b.servers||[]),order:[...(b.order||[])]}; }
+function bundleBody(d){ return {name:d.name,slug:d.slug,enabled:d.enabled,sort:d.sort,main:d.main,nodes:[...d.nodes],sources:[...d.sources],servers:[...d.servers],order:bundleTokens(d)}; }
+const ROUTES={direct:"напрямую",panel:"через сервер с панелью",balancer:"в пул балансировщика"};
+// the items of a category in their order: what the administrator ordered, then the rest in the usual way
+function bundleTokens(d){
+  const all=[]; if(d.main) all.push("main");
+  (CAT.nodes||[]).filter(n=>d.nodes.has(n.id)).forEach(n=>all.push("n:"+n.id));
+  (CAT.sources||[]).filter(x=>d.sources.has(x.id)).forEach(x=>all.push("x:"+x.id));
+  (CAT.servers||[]).filter(v=>d.servers.has(v.id)).forEach(v=>all.push("s:"+v.id));
+  const out=[]; for(const t of d.order||[]) if(all.includes(t)&&!out.includes(t)) out.push(t);
+  for(const t of all) if(!out.includes(t)) out.push(t);
+  return out;
+}
 function whoSees(slug){
   const key="b:"+slug;
   return {users:USERS.filter(u=>(u.sub_keys||[]).includes(key)),plans:PLANS.filter(p=>(p.subs||[]).includes(key))};
@@ -957,6 +968,18 @@ function groupEditor(cur){
   const nodes=CAT.nodes||[], srcs=CAT.sources||[];
   const q=BFILTER.trim().toLowerCase();
   const nodeSub=n=>n.mode==="via"?"через основной":"ссылка";
+  const svs=CAT.servers||[];
+  const toks=bundleTokens(d);
+  const tokInfo=t=>{
+    const [k,r]=t.split(":"), id=parseInt(r||"0",10);
+    if(k==="main") return {label:"Основной сервер",sub:"3 балансировщика"};
+    if(k==="n"){ const n=nodes.find(x=>x.id===id)||{name:"?"}; return {label:n.name,sub:nodeSub(n)}; }
+    if(k==="x"){ const x=srcs.find(y=>y.id===id)||{name:"?",nodes:0}; return {label:"☰ "+x.name,sub:x.nodes+" серв."}; }
+    const v=svs.find(y=>y.id===id)||{name:"?",route:"direct"}; return {label:v.name,sub:"установленный · "+(ROUTES[v.route||"direct"])};
+  };
+  const move=(i,dx)=>{ const a=bundleTokens(d), j=i+dx; if(j<0||j>=a.length) return; [a[i],a[j]]=[a[j],a[i]]; d.order=a; render(); };
+  const drop=t=>{ const [k,r]=t.split(":"), id=parseInt(r||"0",10); if(k==="main") d.main=false; else if(k==="n") d.nodes.delete(id); else if(k==="x") d.sources.delete(id); else d.servers.delete(id); d.order=(d.order||[]).filter(x=>x!==t); render(); };
+  const inV=svs.filter(v=>d.servers.has(v.id)), outV=svs.filter(v=>!d.servers.has(v.id)&&(!q||v.name.toLowerCase().includes(q)));
   const inN=nodes.filter(n=>d.nodes.has(n.id)), outN=nodes.filter(n=>!d.nodes.has(n.id)&&(!q||n.name.toLowerCase().includes(q)));
   const inS=srcs.filter(x=>d.sources.has(x.id)), outS=srcs.filter(x=>!d.sources.has(x.id)&&(!q||x.name.toLowerCase().includes(q)));
   const nm=h("input",{value:d.name,placeholder:"название, например VIP",oninput:e=>d.name=e.target.value});
@@ -969,13 +992,18 @@ function groupEditor(cur){
     h("div",{class:"db"},
       h("div",{class:"grid"},h("div",{},h("div",{class:"k"},"Название"),nm),h("div",{},h("div",{class:"k"},"Адрес"+(isNew?"":" (не меняется)")),sl),h("div",{},h("div",{class:"k"},"Порядок"),so)),
       h("div",{class:"row"},h("label",{class:"row",style:"gap:6px"},en,"группа включена"),h("label",{class:"row",style:"gap:6px"},mn,"включает основной сервер (3 балансировщика)")),
-      h("div",{class:"hint"},"Без отметки «основной сервер» группа только раздаёт серверы: через неё не выдаются балансировщики."),
-      h("div",{class:"sec"},h("h3",{},"В группе ("+(inN.length+inS.length)+")")),
-      h("div",{class:"mem"},inN.map(n=>chip(n.name,nodeSub(n),true,()=>{ d.nodes.delete(n.id); render(); })),inS.map(x=>chip("☰ "+x.name,x.nodes+" серв.",true,()=>{ d.sources.delete(x.id); render(); })),
-        inN.length+inS.length?null:h("span",{class:"muted"},"пока пусто: добавьте серверы ниже")),
+      h("div",{class:"hint"},"Без отметки «основной сервер» группа только раздаёт серверы: через неё не выдаются балансировщики. Установленные серверы (вкладка «Установленные серверы») добавляются сюда так же, как остальные; как именно сервер выдаётся (напрямую, через сервер с панелью или в пул балансировщика), выбирается у самого сервера. «В пул балансировщика» значит, что человек получает такой сервер через основные балансировщики, а не отдельной строкой."),
+      h("div",{class:"sec"},h("h3",{},"В группе ("+toks.length+")"),h("span",{class:"muted"},"порядок сверху вниз: так серверы идут в приложении")),
+      toks.length?h("div",{},toks.map((t,i)=>{
+        const info=tokInfo(t);
+        return h("div",{class:"row",style:"gap:6px;padding:5px 0;border-bottom:1px solid var(--line)"},
+          h("span",{class:"muted",style:"width:22px"},String(i+1)),h("b",{class:"grow"},info.label,info.sub?h("span",{class:"muted",style:"font-size:12px;font-weight:400"}," · "+info.sub):null),
+          h("button",{class:"b s",title:"выше",disabled:i===0,onclick:()=>move(i,-1)},"▲"),h("button",{class:"b s",title:"ниже",disabled:i===toks.length-1,onclick:()=>move(i,1)},"▼"),
+          h("button",{class:"b s",title:"убрать из группы",onclick:()=>drop(t)},"×"));
+      })):h("div",{class:"muted"},"пока пусто: добавьте серверы ниже"),
       h("div",{class:"sec"},h("h3",{},"Можно добавить"),h("input",{placeholder:"фильтр по названию",value:BFILTER,style:"max-width:220px",id:"bfq",oninput:e=>{ BFILTER=e.target.value; render(); const i=$("#bfq"); i.focus(); i.setSelectionRange(99,99); }})),
-      h("div",{class:"mem"},outN.map(n=>addChip(n.name,nodeSub(n),()=>{ d.nodes.add(n.id); render(); })),outS.map(x=>addChip("☰ "+x.name,x.nodes+" серв.",()=>{ d.sources.add(x.id); render(); })),
-        outN.length+outS.length?null:h("span",{class:"muted"},nodes.length+srcs.length?"всё уже в группе":"серверов ещё нет: добавьте их во вкладках «Серверы по ссылке» и «Внешние подписки»")),
+      h("div",{class:"mem"},outN.map(n=>addChip(n.name,nodeSub(n),()=>{ d.nodes.add(n.id); render(); })),outS.map(x=>addChip("☰ "+x.name,x.nodes+" серв.",()=>{ d.sources.add(x.id); render(); })),outV.map(v=>addChip(v.name,"установленный · "+ROUTES[v.route||"direct"],()=>{ d.servers.add(v.id); render(); })),
+        outN.length+outS.length+outV.length?null:h("span",{class:"muted"},nodes.length+srcs.length+svs.length?"всё уже в группе":"серверов ещё нет: добавьте их во вкладках «Серверы по ссылке» и «Внешние подписки»")),
       isNew?null:h("div",{},h("div",{class:"sec"},h("h3",{},"Кто получает группу")),
         h("div",{},w.plans.length?w.plans.map(p=>h("span",{class:"chip",style:"padding-right:10px"},"тариф «"+p.name+"»")):h("span",{class:"muted"},"ни один тариф не включает группу")),
         h("div",{style:"margin-top:6px"},w.users.length?[w.users.slice(0,12).map(u=>h("span",{class:"chip",style:"padding-right:10px;cursor:pointer",onclick:()=>go("users","people",u.name)},"№"+u.id+" "+u.nick)),w.users.length>12?h("span",{class:"muted"},"и ещё "+(w.users.length-12)):null]:h("span",{class:"muted"},"сейчас её не получает ни один человек")),
@@ -1237,12 +1265,21 @@ function netToken(res){ // a token is shown once: the panel keeps only its hash
     h("pre",{style:"white-space:pre-wrap;word-break:break-all;user-select:all"},res.command||res.token),
     h("div",{class:"row"},copyBtn(res.command||res.token),h("button",{class:"b s",onclick:()=>{ NETNEW=null; render(); }},"Закрыть")));
 }
+// how an installed server is given out: directly, through the main server, or as a node of the balancer pool
+function routeSel(s,act){
+  const sel=h("select",{style:"width:auto;margin-top:6px",title:"как выдавать сервер людям"},Object.entries(ROUTES).map(([v,t])=>h("option",{value:v},t)));
+  sel.value=s.route||"direct";
+  sel.onchange=()=>act(async()=>{ await api("POST","/api/servers/"+s.id+"/route",{mode:sel.value}); CAT=await api("GET","/api/catalog"); },"Режим сохранён");
+  const inB=(s.bundles||[]).map(k=>{ const b=(CAT&&CAT.bundles||[]).find(x=>"b:"+x.slug===k); return b?b.name:k; });
+  return h("div",{},sel,h("div",{class:"muted",style:"font-size:12px;margin-top:4px"},inB.length?"в группах: "+inB.join(", "):"ни в одной группе"));
+}
 function vNet(){
   if(!NET) return h("div",{class:"hint"},"загрузка…");
   const name=h("input",{placeholder:"имя, например Берлин"}), kind=h("select",{},h("option",{value:"balancer"},"балансировщик (--mode balancer-only)"),h("option",{value:"endnode"},"конечный сервер (--mode end-node)"));
   const act=async(fn,msg)=>{ try{ await fn(); if(msg) toast(msg); NET=await api("GET","/api/servers"); render(); }catch(e){ toast(e.message,true); } };
   const rows=(NET.servers||[]).map(s=>{ const [st,cl]=netAge(s.last_seen); return h("tr",{},
-    h("td",{},h("b",{},s.name),h("div",{class:"muted",style:"font-size:12px"},s.kind==="balancer"?"балансировщик":"конечный сервер")),
+    h("td",{},h("b",{},s.name),h("div",{class:"muted",style:"font-size:12px"},s.kind==="balancer"?"балансировщик":"конечный сервер"),
+      s.kind==="endnode"?routeSel(s,act):null),
     h("td",{},h("span",{class:"pill "+(s.enabled?cl:"bad")},s.enabled?st:"выключен"),h("div",{class:"muted",style:"font-size:12px"},s.last_seen?fmtDT(Date.parse(s.last_seen)/1000):"")),
     h("td",{},(s.info&&s.info.host)||"—",h("div",{class:"muted",style:"font-size:12px"},(s.info&&s.info.version?"версия "+s.info.version:"")+(s.info&&s.info.links?" · ссылок: "+s.info.links.length:""))),
     h("td",{},"↓ "+fmtBytes(s.down)+" ↑ "+fmtBytes(s.up)),

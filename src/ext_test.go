@@ -94,7 +94,7 @@ func TestExternalSourcesAndCategories(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _ = ba, bb
-	ix, err := st.LoadSubIndex(ctx)
+	ix, err := st.LoadSubIndex(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestExternalSourcesAndCategories(t *testing.T) {
 	if _, err := st.SaveExtSource(ctx, extSourceInput{ID: sid, Name: "Партнёр", Mode: "direct"}); err != nil {
 		t.Fatal(err)
 	}
-	ix, _ = st.LoadSubIndex(ctx)
+	ix, _ = st.LoadSubIndex(ctx, cfg)
 	if _, v := ix.access(cfg, ann); len(v) != 0 {
 		t.Errorf("source switched to direct: %v", v)
 	}
@@ -168,7 +168,7 @@ func TestExternalSourcesAndCategories(t *testing.T) {
 	if err := st.DeleteExtSource(ctx, sid); err != nil {
 		t.Fatal(err)
 	}
-	ix, _ = st.LoadSubIndex(ctx)
+	ix, _ = st.LoadSubIndex(ctx, cfg)
 	if _, la, _ = ix.lines(cfg, ann, "a"); len(la) != 3 {
 		t.Errorf("after deleting: %v", la)
 	}

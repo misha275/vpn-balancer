@@ -116,7 +116,7 @@ func TestBundlesAreDeliveredOnlyAsSubscriptions(t *testing.T) {
 	}
 	// without the balancer there is no gateway key
 	u2, _ := st.UserBySubToken(ctx, u.SubToken)
-	ix2, err := st.LoadSubIndex(ctx)
+	ix2, err := st.LoadSubIndex(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

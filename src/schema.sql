@@ -381,3 +381,12 @@ CREATE TABLE IF NOT EXISTS tg_logins (
     tg_name     TEXT NOT NULL DEFAULT '',
     created     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- installed (end-node) servers in categories: how a server is given out (direct | panel | balancer) and the order of a category
+ALTER TABLE servers ADD COLUMN IF NOT EXISTS route_mode TEXT NOT NULL DEFAULT 'direct';
+ALTER TABLE bundles ADD COLUMN IF NOT EXISTS item_order TEXT[];
+CREATE TABLE IF NOT EXISTS bundle_servers (
+    bundle_id BIGINT NOT NULL REFERENCES bundles(id) ON DELETE CASCADE,
+    server_id BIGINT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+    PRIMARY KEY (bundle_id, server_id)
+);

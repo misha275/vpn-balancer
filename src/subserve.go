@@ -174,7 +174,7 @@ func (s *SubServer) Handler() http.Handler {
 			}
 			keys, _ := effectiveSubs(s.cfg, *u)
 			title := subTitle3(s.cfg, u)
-			ix, err := s.store.LoadSubIndex(ctx)
+			ix, err := s.store.LoadSubIndex(ctx, s.cfg)
 			if err != nil {
 				log.Printf("sub: index: %v", err)
 				http.Error(w, "temporary error", http.StatusServiceUnavailable)
